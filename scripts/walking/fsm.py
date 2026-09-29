@@ -17,46 +17,43 @@ class WalkingFSM:
         self.ssp_duration = walk_config.ssp_duration
         self.dsp_duration = walk_config.dsp_duration
         self.footsteps = footsteps
-        
-        self.state: WalkState = WalkState.STAND
-        
-        self.start_walking = False
-        self.next_footstep = 2
+        self.robot_params = robot_params
+        self.walk_config = walk_config
         
         self.dt = 0.03
         self.mpc_interval = 3 * self.dt
-        self.stance = Stance(
-            left_foot=Foot(
-                FootType.LEFT,
-                np.array([-robot_params.foot_spred, robot_params.foot_y, 0.]),
-                robot_params.foot_size),
-            right_foot=Foot(
-                FootType.RIGHT,
-                np.array([robot_params.foot_spred, robot_params.foot_y, 0.]),
-                robot_params.foot_size),
-            com=PointMass(
-                robot_params.com.copy()
-            )
-        )
-        
-        self.stance_foot: Foot = None
-        self.swing_foot: Foot = None
-        
-        self.footstep_generator = FootstepGenerator(
-            step_length=walk_config.step_length,
-            foot_spread=robot_params.foot_spred,
-            initial_y=robot_params.foot_y,
-            steering_strength=np.deg2rad(5.)
-        )
-        # self.cmd = WalkCommand.STRAIGHT
-        # self.last_cmd = WalkCommand.STRAIGHT
-        # self.tick = 0
-        # self.last_change_cmd_tick = 0
-        
         self.com_xy = None
         self.goal_xy = None
         self.com_fl = None
         self.goal_fl = None
+        self.cmd = np.zeros(3)
+        self.reset_standing()
+
+    def reset_standing(self):
+        p = self.robot_params
+        self.state = WalkState.STAND
+        self.start_walking = False
+        self.next_footstep = 2
+        self.cmd = np.zeros(3)
+        self.stance_foot = None
+        self.swing_foot = None
+        self.stance = Stance(
+            left_foot=Foot(
+                FootType.LEFT,
+                np.array([-p.foot_spred, p.foot_y, 0.]),
+                p.foot_size),
+            right_foot=Foot(
+                FootType.RIGHT,
+                np.array([p.foot_spred, p.foot_y, 0.]),
+                p.foot_size),
+            com=PointMass(p.com.copy()),
+        )
+        self.footstep_generator = FootstepGenerator(
+            step_length=self.walk_config.step_length,
+            foot_spread=p.foot_spred,
+            initial_y=p.foot_y,
+            steering_strength=np.deg2rad(5.)
+        )
     
     def set_cmd(self, cmd: np.ndarray):
         if np.linalg.norm(cmd) > 0.01:
@@ -271,9 +268,11 @@ class WalkingFSM:
         goal_fl = world_xy_to_fl(mid_xy)
         # goal_fl = world_xy_to_fl(self.swing_target.position[:2])
 
-        fwd_adjust = 0.06 if np.abs(self.cmd[0]) > 0.1 else 0.005
+        fwd_adjust = 0.06 if np.abs(self.cmd[0]) > 0.1 else 0.0
         fwd_adjust *= np.sign(self.cmd[0]) * 0.7
         fwd_adjust *= 2
+        if self.next_footstep == 2:
+            fwd_adjust = 0.0
         
         # if np.abs(self.cmd[2]) > 0.1:
         #     fwd_adjust += 0.04

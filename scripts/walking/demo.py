@@ -1,4 +1,5 @@
 from robot import Robot
+from classes import WalkState
 from viberobotics.configs.config import load_config
 from viberobotics.motor.motor_controller_manager import MotorControllerManager
 from viberobotics.utils.utils import get_asset_path
@@ -34,34 +35,56 @@ class Demo(Robot):
             pass
         return self.joystick.get_button(button.value) == 1
     
+    def wait_for_start(self):
+        self.wait_for_button(JoystickButton.START.value)
+        while self.get_button(JoystickButton.START):
+            time.sleep(0.01)
+
     def get_current_button(self):
         for _ in pygame.event.get():
             pass
         for button in JoystickButton:
+            if button == JoystickButton.START:
+                continue
             if self.joystick.get_button(button.value) == 1:
                 return button
         return None
     
-    def deploy_controller(self, motor_manager: MotorControllerManager):
+    def deploy_controller(self, motor_manager: MotorControllerManager, stand_qpos: np.ndarray):
         try:
             dt = 0.03
             rate_limiter = RateLimiter(frequency=1 / dt, warn=True)
-            self.fsm.start_walking = True
-            cmd = np.zeros(3)
+            self.fsm.reset_standing()
+            self.q = self.default_q.copy()
+            leg_idxs = motor_manager.get_sim_idxs('leg')
+            last_legs = np.array(stand_qpos[leg_idxs], dtype=float).copy()
+            tick = 0
+            t_report = time.perf_counter()
             while True:
                 current_button = self.get_current_button()
                 if current_button is not None:
                     return current_button
                 self.fsm.set_cmd(self.get_joystick_cmd())
-                print(self.fsm.cmd)
                 self.fsm.on_tick()
-                
-                start_time = time.time()
-                self.q, success = self.ik(self._get_targets())
-                
-                q_full = np.zeros(motor_manager.n_motors)
-                q_full[motor_manager.get_sim_idxs('leg')] = self.q[7:]
-                motor_manager.set_positions(q_full, 0, 50)
+
+                q_full = np.array(stand_qpos, dtype=float).copy()
+                if self.fsm.state != WalkState.STAND:
+                    self.q, success = self.ik(self._get_targets())
+                    last_legs = self.safe_leg_q(self.q, last_legs, success)
+                    q_full[leg_idxs] = last_legs
+                else:
+                    last_legs = np.array(stand_qpos[leg_idxs], dtype=float).copy()
+                    self.q = self.default_q.copy()
+
+                motor_manager.set_positions(q_full, 0, 30)
+                rate_limiter.sleep()
+
+                tick += 1
+                if tick % 15 == 0:
+                    now = time.perf_counter()
+                    hz = 15.0 / max(now - t_report, 1e-6)
+                    t_report = now
+                    print(f'{hz:.1f} Hz  state {self.fsm.state.name}  cmd {self.fsm.cmd}')
         except KeyboardInterrupt:
             motor_manager.disable_torque()
     
@@ -104,16 +127,18 @@ class Demo(Robot):
                 mode=0
             )
         motor_manager.set_positions(cfg.default_qpos, 0, 30)
-        self.wait_for_button(JoystickButton.START.value)
-        print('starting')
+        self.wait_for_start()
+        print('standing — push the stick to walk')
         while True:
-            button = self.deploy_controller(motor_manager)
+            button = self.deploy_controller(motor_manager, cfg.default_qpos)
             print(f'Button {button} pressed')
+            self.fsm.reset_standing()
+            self.q = self.default_q.copy()
             motor_manager.set_positions(cfg.default_qpos, 0, 30)
             if button == JoystickButton.A:
                 motor_manager.play_recording(get_asset_path('motions/waving_motion.json'))
-                print('motion done, pressing START to continue')
-                self.wait_for_button(JoystickButton.START.value)
+                print('motion done, press START to stand, then push the stick to walk')
+                self.wait_for_start()
             elif button == JoystickButton.B:
                 motor_manager.play_recording(get_asset_path('motions/lay_down_motion.json'))
                 will_exit = True

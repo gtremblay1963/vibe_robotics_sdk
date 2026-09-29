@@ -23,6 +23,7 @@ import viser.uplot
 import plotly.express as px
 
 pygame.init()
+pygame.event.pump()
 
 def _skew(v: np.ndarray) -> np.ndarray:
     v = np.asarray(v, dtype=float).reshape(3)
@@ -162,12 +163,8 @@ class Robot:
         # self.footsteps = generate_footsteps(1.0, self.walk_config.step_length, self.params.foot_spred, initial_y=0.05)
         
         self._init_walking()
-        
-        
-        pygame.joystick.init()
-        if pygame.joystick.get_count() > 0:
-            self.joystick = pygame.joystick.Joystick(0)
-            self.cmd = np.zeros(3)
+        self._init_joystick()
+        self._init_ik()
         
     def _init_walking(self):
         self.fsm = WalkingFSM(
@@ -176,7 +173,76 @@ class Robot:
             self.config,
             self.params
         )
-        
+
+    def _init_joystick(self):
+        pygame.joystick.init()
+        pygame.event.pump()
+        self.cmd = np.zeros(3)
+        self.joystick = None
+        if pygame.joystick.get_count() > 0:
+            self.joystick = pygame.joystick.Joystick(0)
+            self.joystick.init()
+            print(f'Using joystick: {self.joystick.get_name()}')
+        else:
+            print('No joystick detected. Plug in a controller and restart.')
+
+    def _init_ik(self):
+        left_geom_name = self.config.left_foot_name + "_0"
+        right_geom_name = self.config.right_foot_name + "_0"
+        model = self.robot.model
+        geoms = self.robot.collision_model.geometryObjects
+        name_to_gid = {g.name: i for i, g in enumerate(geoms)}
+
+        def add_for_geom(geom_name: str, foot_body_frame_name: str, new_frame_name: str):
+            if model.existFrame(new_frame_name):
+                return
+            if geom_name not in name_to_gid:
+                raise ValueError(f"Collision geom '{geom_name}' not found in collision_model.geometryObjects")
+            g = geoms[name_to_gid[geom_name]]
+            parent_joint = int(g.parentJoint)
+            parent_frame = getattr(g, "parentFrame", None)
+            if parent_frame is None or parent_frame < 0 or parent_frame >= len(model.frames):
+                parent_frame = model.getFrameId(foot_body_frame_name)
+                if parent_frame == len(model.frames):
+                    raise ValueError(f"Fallback parent frame '{foot_body_frame_name}' not found in model.frames")
+            parent_frame = int(parent_frame)
+            model.addFrame(pin.Frame(
+                new_frame_name, parent_joint, parent_frame, g.placement, pin.FrameType.FIXED_JOINT
+            ))
+
+        add_for_geom(left_geom_name, self.config.left_foot_name, f"{left_geom_name}_frame")
+        add_for_geom(right_geom_name, self.config.right_foot_name, f"{right_geom_name}_frame")
+
+        self.robot.data = model.createData()
+        self._ik_left_fid = model.getFrameId(f"{left_geom_name}_frame")
+        self._ik_right_fid = model.getFrameId(f"{right_geom_name}_frame")
+        self._ik_base_fid = model.getFrameId('base')
+        if self._ik_left_fid == len(model.frames) or self._ik_right_fid == len(model.frames):
+            raise ValueError(f"Frame not found: {left_geom_name}_frame or {right_geom_name}_frame")
+        if self._ik_base_fid == len(model.frames):
+            raise ValueError("Base frame not found.")
+
+        data_ref = model.createData()
+        q_flat = pin.neutral(model).copy()
+        pin.forwardKinematics(model, data_ref, q_flat)
+        pin.updateFramePlacements(model, data_ref)
+        self._R_L_flat = data_ref.oMf[self._ik_left_fid].rotation.copy()
+        self._R_R_flat = data_ref.oMf[self._ik_right_fid].rotation.copy()
+
+        lo = np.asarray(model.lowerPositionLimit[7:], dtype=float)
+        hi = np.asarray(model.upperPositionLimit[7:], dtype=float)
+        self.joint_lower = np.where(np.isfinite(lo), lo, -1.2)
+        self.joint_upper = np.where(np.isfinite(hi), hi, 1.2)
+
+    def safe_leg_q(self, q_full, last_legs, success, max_step=0.08):
+        """Clip IK legs to joint limits and reject jumps that could damage the robot."""
+        legs = np.asarray(q_full[7:], dtype=float).copy()
+        if (not success) or (legs.shape != last_legs.shape) or (not np.all(np.isfinite(legs))):
+            print('IK unsafe, holding last pose')
+            return last_legs
+        legs = np.clip(legs, self.joint_lower, self.joint_upper)
+        legs = last_legs + np.clip(legs - last_legs, -max_step, max_step)
+        return legs
     
     def get_params(self):
         pin.centerOfMass(self.model, self.robot.data, self.default_q)
@@ -208,8 +274,8 @@ class Robot:
         
     def ik(self,
        ik_target: IKTarget,
-       max_iters: int = 300,
-       tol: float = 2e-3,
+       max_iters: int = 80,
+       tol: float = 0.01,
        damping: float = 3e-2,
        step: float = 0.05,
        update_heading: bool=False) -> np.ndarray:
@@ -222,71 +288,19 @@ class Robot:
             heading=ik_target.heading
         )
 
-        left_geom_name = self.config.left_foot_name + "_0"
-        right_geom_name = self.config.right_foot_name + "_0"
-
         model = self.robot.model
-        gmodel = self.robot.collision_model
-        geoms = gmodel.geometryObjects
-    
-        def _ensure_collider_frame():
-            name_to_gid = {g.name: i for i, g in enumerate(geoms)}
+        data = self.robot.data
+        left_fid = self._ik_left_fid
+        right_fid = self._ik_right_fid
+        base_fid = self._ik_base_fid
+        R_L_flat = self._R_L_flat
+        R_R_flat = self._R_R_flat
 
-            def add_for_geom(geom_name: str, foot_body_frame_name: str, new_frame_name: str):
-                if model.existFrame(new_frame_name):
-                    return
-
-                if geom_name not in name_to_gid:
-                    raise ValueError(f"Collision geom '{geom_name}' not found in collision_model.geometryObjects")
-
-                g = geoms[name_to_gid[geom_name]]
-
-                parent_joint = int(g.parentJoint)
-
-                parent_frame = getattr(g, "parentFrame", None)
-                if parent_frame is None or parent_frame < 0 or parent_frame >= len(model.frames):
-                    parent_frame = model.getFrameId(foot_body_frame_name)
-                    if parent_frame == len(model.frames):
-                        raise ValueError(f"Fallback parent frame '{foot_body_frame_name}' not found in model.frames")
-                parent_frame = int(parent_frame)
-
-                placement = g.placement
-                f = pin.Frame(new_frame_name, parent_joint, parent_frame, placement, pin.FrameType.FIXED_JOINT)
-                model.addFrame(f)
-
-            add_for_geom(left_geom_name, self.config.left_foot_name, f"{left_geom_name}_frame")
-            add_for_geom(right_geom_name, self.config.right_foot_name, f"{right_geom_name}_frame")
-
-        _ensure_collider_frame()
-
-        # IMPORTANT: re-create data AFTER adding frames
-        data = model.createData()
-        self.robot.data = data
-
-        q = pin.neutral(model).copy()
-        q[3:7] = self.q[3:7].copy()
-        # q = self.q.copy()
-        
-
-        left_fid = model.getFrameId(f"{left_geom_name}_frame")
-        right_fid = model.getFrameId(f"{right_geom_name}_frame")
-        if left_fid == len(model.frames) or right_fid == len(model.frames):
-            raise ValueError(f"Frame not found: {left_geom_name}_frame or {right_geom_name}_frame")
-
-        # --- base frame id for relative errors ---
-        # Use whichever you actually have:
-        # base_fid = model.getFrameId(BASE_NAME)
-        base_fid = model.getFrameId('base')
-        if base_fid == len(model.frames):
-            raise ValueError("Base frame not found (BASE_NAME / self.config.base_name).")
-
-        # --- flat reference orientations (as you had) ---
-        data_ref = model.createData()
-        q_flat = pin.neutral(model).copy()
-        pin.forwardKinematics(model, data_ref, q_flat)
-        pin.updateFramePlacements(model, data_ref)
-        R_L_flat = data_ref.oMf[left_fid].rotation.copy()
-        R_R_flat = data_ref.oMf[right_fid].rotation.copy()
+        if self.q.shape[0] != model.nq or not np.all(np.isfinite(self.q)):
+            q = pin.neutral(model).copy()
+        else:
+            q = self.q.copy()
+        q[:3] = q[:3] - offset
         
         for _ in range(max_iters):
             pin.forwardKinematics(model, data, q)
@@ -372,14 +386,21 @@ class Robot:
             q = pin.integrate(model, q, step * dq)
 
         success = np.linalg.norm(e) < tol
-        return q + np.concatenate([offset, np.zeros(self.nq - 3)]), success
+        q_out = q + np.concatenate([offset, np.zeros(self.nq - 3)])
+        if not np.all(np.isfinite(q_out)):
+            return self.default_q.copy(), False
+        q_out[7:] = np.clip(q_out[7:], self.joint_lower, self.joint_upper)
+        return q_out, success
     
     def get_joystick_cmd(self):
         for _ in pygame.event.get():
             pass
+        if self.joystick is None:
+            return self.cmd
         self.cmd[0] = -self.joystick.get_axis(1)  # forward/backward
         self.cmd[1] = -self.joystick.get_axis(0)   # left/right
         self.cmd[2] =  self.joystick.get_axis(3)  # yaw
+        self.cmd[np.abs(self.cmd) < 0.2] = 0.0
         return self.cmd
     
     def _get_targets(self):
@@ -543,26 +564,33 @@ class Robot:
         model = mujoco.MjModel.from_xml_path((Path(self.config.xml_path).parent / 'scene.xml').as_posix())
         data = mujoco.MjData(model)
         print(model.opt.timestep)
-        
-        self.fsm.start_walking = True
+
         dt = 0.03
-        rate_limiter = RateLimiter(frequency=1/dt, warn=False)
+        rate_limiter = RateLimiter(frequency=1 / dt, warn=False)
         kp = 200
         kd = 10
-        self.cmd = np.array([1., 0, 0])
+        n_substeps = max(1, int(round(dt / model.opt.timestep)))
+
         self.fsm.set_cmd(self.cmd)
+        self.q, _ = self.ik(self._get_targets())
+        data.qpos[7:] = self.q[7:]
+        mujoco.mj_forward(model, data)
+
+        print('Simulation ready. Move the left stick to walk, right stick to yaw.')
         with mujoco.viewer.launch_passive(model, data) as viewer:
-            while True:
+            while viewer.is_running():
+                self.fsm.set_cmd(self.get_joystick_cmd())
                 self.fsm.on_tick()
-                
-                self.q, _ = self.ik(self._get_targets())
-                for _ in range(int(dt / model.opt.timestep)):
+
+                self.q, _ = self.ik(self._get_targets(), tol=0.01)
+                for _ in range(n_substeps):
                     cur_q = data.qpos[7:].copy()
                     cur_qd = data.qvel[6:].copy()
                     tau = kp * (self.q[7:] - cur_q) - kd * cur_qd
                     data.ctrl[:] = np.clip(tau, -4., 4.)
                     mujoco.mj_step(model, data)
-                    viewer.sync()
+                viewer.sync()
+                rate_limiter.sleep()
     
     def deploy_remote(self, host, is_sender):
         from remote import NumpySocket
@@ -585,6 +613,7 @@ class Robot:
             import pygame
             
             pygame.init()
+          
             pygame.joystick.init()
             use_joystick = pygame.joystick.get_count() > 0
             print('Using joystick:', use_joystick)
@@ -706,25 +735,16 @@ class Robot:
         try:
             dt = 0.03
             rate_limiter = RateLimiter(frequency=1 / dt, warn=True)
-            self.fsm.start_walking = True
             cmd = np.zeros(3)
             while True:
                 self.fsm.set_cmd(self.get_joystick_cmd())
                 print(self.fsm.cmd)
                 self.fsm.on_tick()
                 
-                start_time = time.time()
                 self.q, success = self.ik(self._get_targets())
-                # print(f"IK solve time: {time.time() - start_time:.3f}s")
-                
-                # rate_limiter_inner = RateLimiter(frequency=1 / 0.002, warn=True)
-                # for _ in range(int(dt / 0.002)):
-                #     duty = 32 * (self.q[7:] - motor_manager.get_state()[0]) - 1.5 * motor_manager.get_state()[1]
-                #     motor_manager.set_duty(duty * 200)
-                #     rate_limiter_inner.sleep()
                 
                 motor_manager.set_positions(self.q[7:], 0, 50)
-                # rate_limiter.sleep()
+                rate_limiter.sleep()
         except KeyboardInterrupt:
             motor_manager.disable_torque()
         
