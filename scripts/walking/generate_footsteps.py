@@ -24,6 +24,10 @@ def generate_footsteps(distance, step_length, foot_spread, initial_y=0.) -> List
 def wrap_pi(a: float) -> float:
     return (a + np.pi) % (2 * np.pi) - np.pi
 
+def _smoothstep(x: float) -> float:
+    x = min(max(x, 0.0), 1.0)
+    return x * x * (3.0 - 2.0 * x)
+
 def rotz(theta: float) -> np.ndarray:
     c, s = np.cos(theta), np.sin(theta)
     return np.array([
@@ -43,15 +47,47 @@ class FootstepGenerator:
                  step_length: float,
                  foot_spread: float,
                  initial_y: float = 0.0,
-                 steering_strength: float = np.deg2rad(10.)):
+                 steering_strength: float = np.deg2rad(10.),
+                 straight_yaw_trim: float = 0.0):
         # assume starts at [+foot_spread, initial_y], [-foot_spread, initial_y]
         self.step_length = step_length
         self.foot_spread = foot_spread # half foot distance
         self.steering_strength = steering_strength
+        # Radians of left yaw added each step on a straight walk.
+        # Positive ref_theta turns the robot to its right.
+        self.straight_yaw_trim = straight_yaw_trim
+        # Meters to the robot's left per step at full stick. Off unless enabled.
+        self.lateral_comp_enabled = False
+        self.lateral_comp_forward = 0.0
+        self.lateral_comp_backward = 0.0
+        self._lateral_comp = 0.0
         
         self.ref_x = 0.
         self.ref_y = initial_y
         self.ref_theta = 0.
+
+    def reset_lateral_comp(self):
+        self._lateral_comp = 0.0
+
+    def _lateral_comp_target(self, fwd_cmd: float) -> float:
+        # cmd[1] > 0 already means left: the step reference subtracts robot-right.
+        # The same sign is used here. A positive value shifts the path left.
+        if not self.lateral_comp_enabled:
+            return 0.0
+        if fwd_cmd > 0.0:
+            return _smoothstep(fwd_cmd) * self.lateral_comp_forward
+        if fwd_cmd < 0.0:
+            return _smoothstep(-fwd_cmd) * self.lateral_comp_backward
+        return 0.0
+
+    def _slew_lateral_comp(self, fwd_cmd: float) -> float:
+        target = self._lateral_comp_target(fwd_cmd)
+        # Reach most of the shift on the first step. A slower ramp stays
+        # under the 1 cm IK tolerance, so the motors never leave the old pose.
+        self._lateral_comp += 0.8 * (target - self._lateral_comp)
+        if target == 0.0 and abs(self._lateral_comp) < 5e-4:
+            self._lateral_comp = 0.0
+        return self._lateral_comp
         
     
     def _forward(self, theta):
@@ -70,7 +106,13 @@ class FootstepGenerator:
         # scale commands
         d_fwd  = float(cmd[0]) * self.step_length
         d_lat  = float(cmd[1]) * self.step_length   # or a separate lateral_step_length
+        # Positive d_lat moves the reference left. Zero while stopped.
+        d_lat += self._slew_lateral_comp(float(cmd[0]))
         dtheta = float(cmd[2]) * self.steering_strength
+        # Same correction forward and backward: the real robot drifts right
+        # on a straight line even when the stick yaw is zero.
+        if abs(float(cmd[0])) > 0.1:
+            dtheta -= abs(float(cmd[0])) * self.straight_yaw_trim
 
         self.ref_theta = wrap_pi(self.ref_theta + dtheta)
 

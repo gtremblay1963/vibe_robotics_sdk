@@ -229,6 +229,25 @@ class Robot:
         self._R_L_flat = data_ref.oMf[self._ik_left_fid].rotation.copy()
         self._R_R_flat = data_ref.oMf[self._ik_right_fid].rotation.copy()
 
+        # Several leg joints can place the same foot. The solver otherwise
+        # ratchets hip yaw (the twist at the knee) inward, then the knees.
+        leg_q, leg_v = [], []
+        for name in self._WALK_LEG_JOINTS:
+            jid = model.getJointId(name)
+            leg_q.append(int(model.joints[jid].idx_q))
+            leg_v.append(int(model.joints[jid].idx_v))
+        self._leg_q = np.array(leg_q, dtype=int)
+        self._leg_v = np.array(leg_v, dtype=int)
+        posture_w = np.full(len(leg_q), 1.0)
+        for i, name in enumerate(self._WALK_LEG_JOINTS):
+            if name.endswith("hip_yaw"):
+                posture_w[i] = 2.0
+        self._leg_posture_w = posture_w
+        self._hip_yaw_q = np.array(
+            [self._leg_q[i] for i, name in enumerate(self._WALK_LEG_JOINTS) if name.endswith("hip_yaw")],
+            dtype=int,
+        )
+
         lo = np.asarray(model.lowerPositionLimit[7:], dtype=float)
         hi = np.asarray(model.upperPositionLimit[7:], dtype=float)
         self.joint_lower = np.where(np.isfinite(lo), lo, -1.2)
@@ -246,7 +265,6 @@ class Robot:
     
     def get_params(self):
         pin.centerOfMass(self.model, self.robot.data, self.default_q)
-        com = np.asarray(self.robot.data.com[0])
     
         left_foot_frame_id = self.model.getFrameId(self.config.left_foot_name)
         right_foot_frame_id = self.model.getFrameId(self.config.right_foot_name)
@@ -254,7 +272,6 @@ class Robot:
         right_foot_frame_pos = self.robot.data.oMf[right_foot_frame_id].translation.copy()
         
         pin.updateGeometryPlacements(self.model, self.robot.data, self.robot.collision_model, self.robot.collision_data)
-        model = self.robot.model
         gmodel = self.robot.collision_model
         geoms = gmodel.geometryObjects
         name_to_gid = {g.name: i for i, g in enumerate(geoms)}
@@ -263,11 +280,18 @@ class Robot:
         right_foot_pos = self.robot.collision_data.oMg[0].translation.copy()
         
         foot_spred = np.linalg.norm(left_foot_pos[0] - right_foot_pos[0]) / 2.0
+        foot_y = (left_foot_pos[1] + right_foot_pos[1]) / 2.0
+        com = np.asarray(self.robot.data.com[0], dtype=float).copy()
+        foot_z = 0.5 * (left_foot_pos[2] + right_foot_pos[2])
+        # Pinocchio COM z is ~0 at default_q; LIPM needs a real height above the feet.
+        com[0] = 0.5 * (left_foot_pos[0] + right_foot_pos[0])
+        com[1] = foot_y
+        com[2] = foot_z + max(float(com[2] - foot_z), 0.15)
         return RobotParams(
             com=com,
             foot_spred=foot_spred,
             foot_size=self.config.foot_size,
-            foot_y=(left_foot_pos[1] + right_foot_pos[1]) / 2.0,
+            foot_y=foot_y,
             left_foot_offset=left_foot_pos - left_foot_frame_pos,
             right_foot_offset=right_foot_pos - right_foot_frame_pos,
         )
@@ -351,8 +375,10 @@ class Robot:
 
             w_ori = 1.0
             w_head = 1.0
-            e = np.concatenate([eL_pos, w_ori*eL_ori, eR_pos, w_ori*eR_ori, eC, w_head*eC_ori], axis=0)
-            if np.linalg.norm(e) < tol:
+            e_task = np.concatenate([eL_pos, w_ori*eL_ori, eR_pos, w_ori*eR_ori, eC, w_head*eC_ori], axis=0)
+            yaw_err = -q[self._hip_yaw_q]
+            if np.linalg.norm(e_task) < tol and np.max(np.abs(yaw_err)) < 0.03:
+                e = e_task
                 break
 
             JL6_w = pin.computeFrameJacobian(model, data, q, left_fid, pin.ReferenceFrame.WORLD)
@@ -382,10 +408,16 @@ class Robot:
             ])
 
             A = (J @ J.T) + (damping ** 2) * np.eye(J.shape[0])
-            dq = J.T @ np.linalg.solve(A, e)
+            dq_task = J.T @ np.linalg.solve(A, e_task)
+            # Only the motion that does not move the feet. This unwinds the
+            # inward twist without pulling the feet off their targets.
+            v_post = np.zeros(J.shape[1])
+            v_post[self._leg_v] = self._leg_posture_w * (self.default_q[self._leg_q] - q[self._leg_q])
+            N = np.eye(J.shape[1]) - J.T @ np.linalg.solve(A, J)
+            dq = dq_task + N @ v_post
             q = pin.integrate(model, q, step * dq)
 
-        success = np.linalg.norm(e) < tol
+        success = np.linalg.norm(e_task) < tol
         q_out = q + np.concatenate([offset, np.zeros(self.nq - 3)])
         if not np.all(np.isfinite(q_out)):
             return self.default_q.copy(), False
@@ -414,7 +446,9 @@ class Robot:
         )
         d_xy = com_pos_nominal[:2] - center_xy
         d_f = d_xy @ fwd
-        d_f = np.clip(d_f, -0.002, 0.002)
+        # Allow the COM a little behind mid-foot (over the stance foot) so the
+        # swing foot does not pull the torso forward. Do not open the forward clip.
+        d_f = np.clip(d_f, -0.010, 0.002)
         d_l = d_xy @ lat
         lateral_scale = 0.7 if np.abs(self.cmd[0]) < 0.1 and (np.abs(self.cmd[2]) > 0.1 or np.abs(self.cmd[1]) > 0.1) else 0.5
         forward_scale = 1.
@@ -559,35 +593,72 @@ class Robot:
                 )
             visualizer.set_state(self.q)
             rate_limiter.sleep()
+
+    _WALK_LEG_JOINTS = (
+        'right_hip_roll', 'right_hip_pitch', 'right_hip_yaw',
+        'right_knee', 'right_ankle_pitch', 'right_ankle_roll',
+        'left_hip_roll', 'left_hip_pitch', 'left_hip_yaw',
+        'left_knee', 'left_ankle_pitch', 'left_ankle_roll',
+    )
+
+    def _mj_actuator_id(self, model, joint_name):
+        for name in (joint_name, joint_name + '_ctrl'):
+            aid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
+            if aid >= 0:
+                return aid
+        return -1
+
+    def _full_body_q_target(self, model, q_legs):
+        """Map 12 walking-leg joints onto the full-body MuJoCo actuator vector."""
+        q = np.zeros(model.nu)
+        q_legs = np.asarray(q_legs, dtype=float).reshape(-1)
+        for i, joint_name in enumerate(self._WALK_LEG_JOINTS):
+            if i >= q_legs.shape[0]:
+                break
+            aid = self._mj_actuator_id(model, joint_name)
+            if aid >= 0:
+                q[aid] = q_legs[i]
+        return q
     
     def simulate(self):
-        model = mujoco.MjModel.from_xml_path((Path(self.config.xml_path).parent / 'scene.xml').as_posix())
+        scene_path = get_asset_path('mujoco/SundayA1_short_new/scene.xml')
+        model = mujoco.MjModel.from_xml_path(Path(scene_path).as_posix())
         data = mujoco.MjData(model)
-        print(model.opt.timestep)
+        print(model.opt.timestep, 'nu=', model.nu, 'nq=', model.nq)
 
         dt = 0.03
         rate_limiter = RateLimiter(frequency=1 / dt, warn=False)
         kp = 200
         kd = 10
         n_substeps = max(1, int(round(dt / model.opt.timestep)))
+        use_position_actuators = model.nu > 12
 
         self.fsm.set_cmd(self.cmd)
         self.q, _ = self.ik(self._get_targets())
-        data.qpos[7:] = self.q[7:]
+        q_target = self._full_body_q_target(model, self.q[7:])
+        data.qpos[2] = 0.22
+        data.qpos[7:] = q_target[: model.nq - 7]
         mujoco.mj_forward(model, data)
 
-        print('Simulation ready. Move the left stick to walk, right stick to yaw.')
+        print('Full-body simulation. Left stick walk, right stick yaw. Arms stay in the default pose.')
+        ignore_cmd_until = time.perf_counter() + 0.5
         with mujoco.viewer.launch_passive(model, data) as viewer:
             while viewer.is_running():
-                self.fsm.set_cmd(self.get_joystick_cmd())
+                cmd = self.get_joystick_cmd()
+                if time.perf_counter() < ignore_cmd_until:
+                    cmd = np.zeros(3)
+                self.fsm.set_cmd(cmd)
                 self.fsm.on_tick()
-
                 self.q, _ = self.ik(self._get_targets(), tol=0.01)
+                q_target = self._full_body_q_target(model, self.q[7:])
                 for _ in range(n_substeps):
-                    cur_q = data.qpos[7:].copy()
-                    cur_qd = data.qvel[6:].copy()
-                    tau = kp * (self.q[7:] - cur_q) - kd * cur_qd
-                    data.ctrl[:] = np.clip(tau, -4., 4.)
+                    if use_position_actuators:
+                        data.ctrl[:] = q_target
+                    else:
+                        cur_q = data.qpos[7:].copy()
+                        cur_qd = data.qvel[6:].copy()
+                        tau = kp * (q_target - cur_q) - kd * cur_qd
+                        data.ctrl[:] = np.clip(tau, -4., 4.)
                     mujoco.mj_step(model, data)
                 viewer.sync()
                 rate_limiter.sleep()

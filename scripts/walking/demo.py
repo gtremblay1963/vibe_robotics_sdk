@@ -11,6 +11,14 @@ from loop_rate_limiters import RateLimiter
 import argparse
 
 
+# Real robot only. Positive values shift each step to the robot's left.
+# The straight walk drifts right, so both defaults push left, in meters,
+# at full stick. 5 mm was below the 1 cm IK tolerance and did not move
+# the motors. Set the flag to False to walk with no lateral compensation.
+LATERAL_COMP_ENABLED = False
+LATERAL_COMP_FORWARD_LEFT_M = 0.03
+LATERAL_COMP_BACKWARD_LEFT_M = 0.05
+
 class JoystickButton(Enum):
     A = 0
     B = 1
@@ -55,16 +63,34 @@ class Demo(Robot):
             dt = 0.03
             rate_limiter = RateLimiter(frequency=1 / dt, warn=True)
             self.fsm.reset_standing()
+            # Kept at 0. A left-yaw trim made the robot sway and did not
+            # stop the right drift. Do not raise this until the hip is solid.
+            self.fsm.footstep_generator.straight_yaw_trim = 0.0
+            self.fsm.footstep_generator.lateral_comp_enabled = LATERAL_COMP_ENABLED
+            self.fsm.footstep_generator.lateral_comp_forward = LATERAL_COMP_FORWARD_LEFT_M
+            self.fsm.footstep_generator.lateral_comp_backward = LATERAL_COMP_BACKWARD_LEFT_M
+            if LATERAL_COMP_ENABLED:
+                print(
+                    'lateral comp left: '
+                    f'forward {LATERAL_COMP_FORWARD_LEFT_M * 100:.1f} cm, '
+                    f'backward {LATERAL_COMP_BACKWARD_LEFT_M * 100:.1f} cm'
+                )
+            else:
+                print('lateral comp off')
             self.q = self.default_q.copy()
             leg_idxs = motor_manager.get_sim_idxs('leg')
             last_legs = np.array(stand_qpos[leg_idxs], dtype=float).copy()
+            ignore_cmd_until = time.perf_counter() + 0.5
             tick = 0
             t_report = time.perf_counter()
             while True:
                 current_button = self.get_current_button()
                 if current_button is not None:
                     return current_button
-                self.fsm.set_cmd(self.get_joystick_cmd())
+                cmd = self.get_joystick_cmd()
+                if time.perf_counter() < ignore_cmd_until:
+                    cmd = np.zeros(3)
+                self.fsm.set_cmd(cmd)
                 self.fsm.on_tick()
 
                 q_full = np.array(stand_qpos, dtype=float).copy()

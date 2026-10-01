@@ -37,6 +37,8 @@ class WalkingFSM:
         self.cmd = np.zeros(3)
         self.stance_foot = None
         self.swing_foot = None
+        com = np.asarray(p.com, dtype=float).copy()
+        com[2] = max(float(com[2]), 0.15)
         self.stance = Stance(
             left_foot=Foot(
                 FootType.LEFT,
@@ -46,7 +48,7 @@ class WalkingFSM:
                 FootType.RIGHT,
                 np.array([p.foot_spred, p.foot_y, 0.]),
                 p.foot_size),
-            com=PointMass(p.com.copy()),
+            com=PointMass(com),
         )
         self.footstep_generator = FootstepGenerator(
             step_length=self.walk_config.step_length,
@@ -75,6 +77,7 @@ class WalkingFSM:
     def start_standing(self):
         self.start_walking = False
         self.state = WalkState.STAND
+        self.footstep_generator.reset_lateral_comp()
         return self.run_standing()
     
     def run_standing(self):
@@ -214,7 +217,7 @@ class WalkingFSM:
         self._fl_to_world = np.stack([fwd, right], axis=1)  # shape (2,2): columns are [fwd, right]
 
         # --- ZMP constraint in 1D form: zmp = [1, 0, -h/g] x_axis_state ---
-        h = float(self.stance.com.position[2])
+        h = max(float(self.stance.com.position[2]), 0.12)
         g = 9.81
         zmp_from_state = np.array([1., 0., -h / g])
         C = np.array([zmp_from_state, -zmp_from_state])  # (2,3)
@@ -268,7 +271,9 @@ class WalkingFSM:
         goal_fl = world_xy_to_fl(mid_xy)
         # goal_fl = world_xy_to_fl(self.swing_target.position[:2])
 
-        fwd_adjust = 0.06 if np.abs(self.cmd[0]) > 0.1 else 0.0
+        # Keep the mid-foot goal (lateral balance). Use a smaller forward bias
+        # so walking does not pitch the torso as far ahead of the support.
+        fwd_adjust = 0.03 if np.abs(self.cmd[0]) > 0.1 else 0.0
         fwd_adjust *= np.sign(self.cmd[0]) * 0.7
         fwd_adjust *= 2
         if self.next_footstep == 2:
@@ -347,7 +352,7 @@ class WalkingFSM:
             [T**2 / 2],
             [T]
         ])
-        h = self.stance.com.position[2]
+        h = max(float(self.stance.com.position[2]), 0.12)
         g = 9.81
         zmp_from_state = np.array([1., 0., -h / g])
         C = np.array([zmp_from_state, -zmp_from_state])
