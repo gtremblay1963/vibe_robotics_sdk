@@ -9,6 +9,7 @@ import pink
 from pink.solve_ik import solve_ik
 from typing import List, Union
 from fsm import WalkingFSM
+from zmp_preview import WalkingFSMPreview
 from viser_vis import ViserVisualizer
 import time
 from loop_rate_limiters import RateLimiter
@@ -24,6 +25,10 @@ import plotly.express as px
 
 pygame.init()
 pygame.event.pump()
+
+# Reglages du COM envoye a l'IK (a ajuster sur le robot reel).
+COM_LAT_SCALE = 0.8   # 1.0 = balancement lateral complet calcule par le planificateur
+COM_FWD_TRIM = 0.0    # m, > 0 penche le robot vers l'avant
 
 def _skew(v: np.ndarray) -> np.ndarray:
     v = np.asarray(v, dtype=float).reshape(3)
@@ -141,9 +146,9 @@ class Robot:
             foot_size=np.array([0.035, 0.09, 0.005]) * 2
         )
         self.walk_config = WalkConfig(
-            ssp_duration=0.7,
-            dsp_duration=0.07,
-            step_length=0.03,
+            ssp_duration=0.6,
+            dsp_duration=0.15,
+            step_length=0.04,
         )
         
         self.robot = pin.RobotWrapper.BuildFromMJCF(filename=self.config.xml_path, root_joint=None)
@@ -167,7 +172,7 @@ class Robot:
         self._init_ik()
         
     def _init_walking(self):
-        self.fsm = WalkingFSM(
+        self.fsm = WalkingFSMPreview(
             self.walk_config,
             None,
             self.config,
@@ -256,7 +261,7 @@ class Robot:
     def safe_leg_q(self, q_full, last_legs, success, max_step=0.08):
         """Clip IK legs to joint limits and reject jumps that could damage the robot."""
         legs = np.asarray(q_full[7:], dtype=float).copy()
-        if (not success) or (legs.shape != last_legs.shape) or (not np.all(np.isfinite(legs))):
+        if (legs.shape != last_legs.shape) or (not np.all(np.isfinite(legs))):
             print('IK unsafe, holding last pose')
             return last_legs
         legs = np.clip(legs, self.joint_lower, self.joint_upper)
@@ -286,7 +291,7 @@ class Robot:
         # Pinocchio COM z is ~0 at default_q; LIPM needs a real height above the feet.
         com[0] = 0.5 * (left_foot_pos[0] + right_foot_pos[0])
         com[1] = foot_y
-        com[2] = foot_z + max(float(com[2] - foot_z), 0.15)
+        com[2] = float(com[2] - foot_z)  # hauteur du COM au-dessus des pieds (0,2055 m)
         return RobotParams(
             com=com,
             foot_spred=foot_spred,
@@ -373,6 +378,10 @@ class Robot:
             yaw_err = float(np.arctan2(Rerr[1,0], Rerr[0,0]))  # yaw error about +Z
             eC_ori = np.array([yaw_err])
 
+            # Tangage du torse tenu a zero (le roulis reste libre pour le balancement).
+            ax_lat = Rdes_B_w[:, 0]
+            eC_ori = np.array([yaw_err, float(ax_lat @ pin.log3(Rerr))])
+
             w_ori = 1.0
             w_head = 1.0
             e_task = np.concatenate([eL_pos, w_ori*eL_ori, eR_pos, w_ori*eR_ori, eC, w_head*eC_ori], axis=0)
@@ -393,7 +402,7 @@ class Robot:
             JR_ori = JR6_w[3:6, :]
             
             JB6_w = pin.computeFrameJacobian(model, data, q, base_fid, pin.ReferenceFrame.WORLD)
-            JB_yaw = JB6_w[5:6, :]
+            JB_yaw = np.vstack([JB6_w[5:6, :], (ax_lat @ JB6_w[3:6, :])[None, :]])
 
             # CoM jacobian is in world; rotate to base to match eC
             JC_w = pin.jacobianCenterOfMass(model, data, q)
@@ -446,14 +455,9 @@ class Robot:
         )
         d_xy = com_pos_nominal[:2] - center_xy
         d_f = d_xy @ fwd
-        # Allow the COM a little behind mid-foot (over the stance foot) so the
-        # swing foot does not pull the torso forward. Do not open the forward clip.
-        d_f = np.clip(d_f, -0.010, 0.002)
         d_l = d_xy @ lat
-        lateral_scale = 0.7 if np.abs(self.cmd[0]) < 0.1 and (np.abs(self.cmd[2]) > 0.1 or np.abs(self.cmd[1]) > 0.1) else 0.5
-        forward_scale = 1.
         self.d_f = d_f
-        com_xy = center_xy + (forward_scale * d_f) * fwd + (lateral_scale * d_l) * lat
+        com_xy = center_xy + (d_f + COM_FWD_TRIM) * fwd + (COM_LAT_SCALE * d_l) * lat
         com_pos = np.array([com_xy[0], com_xy[1], com_pos_nominal[2]])
         return IKTarget(
             left_foot_pose=self.fsm.stance.left_foot,
