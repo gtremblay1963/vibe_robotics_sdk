@@ -79,12 +79,19 @@ class WalkingFSMPreview(WalkingFSM):
             segs.append((max(self.rem_time, 0.0), st, st))
         tgt_side = self.swing_foot.side
         tgt = self._zmp_of(self.swing_target.position[:2], tgt_side)
+        gen = copy.copy(self.footstep_generator)
         if np.linalg.norm(self.cmd) < 0.01:
-            m = 0.5 * (self.stance_foot.position[:2] + self.swing_target.position[:2])
-            segs.append((self.stop_time, st, m))
+            # Arret : si les pieds ne sont pas cote a cote, un dernier pas les ramene ensemble.
+            a, b = st, tgt
+            if not self._aligned(self.stance_foot.position[:2], self.swing_target.position[:2]):
+                segs.append((self.dsp_duration, st, tgt))
+                segs.append((self.ssp_duration, tgt, tgt))
+                last = gen.get_next_footstep(self.cmd, tgt_side)
+                a, b = tgt, self._zmp_of(last.position[:2], self.stance_foot.side)
+            m = 0.5 * (a + b)
+            segs.append((self.stop_time, a, m))
             segs.append((1e3, m, m))
             return segs
-        gen = copy.copy(self.footstep_generator)
         cur, cur_side = st, self.stance_foot.side
         nxt, nxt_side = tgt, tgt_side
         t = sum(s[0] for s in segs)
@@ -112,6 +119,22 @@ class WalkingFSMPreview(WalkingFSM):
             s = 1.0 if d <= 1e-9 else min(max((t - t0) / d, 0.0), 1.0)
             out[k] = a + s * (b - a)
         return out
+
+    def _aligned(self, p_a, p_b, tol=0.005):
+        """Vrai si deux pieds sont cote a cote (pas de decalage avant-arriere dans le sens de la marche)."""
+        th = self.footstep_generator.ref_theta
+        fwd = np.array([np.sin(th), np.cos(th)])
+        return abs(float((np.asarray(p_a) - np.asarray(p_b)) @ fwd)) < tol
+
+    def run_single_support(self):
+        if self.rem_time <= 0:
+            stop = np.linalg.norm(self.cmd) < 0.01
+            if stop and self._aligned(self.stance.left_foot.position[:2], self.stance.right_foot.position[:2]):
+                return self.start_standing()
+            return self.start_double_support()
+        self.run_swing_foot()
+        self.run_com_mpc()
+        self.rem_time -= self.dt
 
     # --- remplace le MPC --------------------------------------------
     def update_mpc(self, dsp_duration, ssp_duration):

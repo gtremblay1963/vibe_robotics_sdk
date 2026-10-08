@@ -27,8 +27,9 @@ pygame.init()
 pygame.event.pump()
 
 # Reglages du COM envoye a l'IK (a ajuster sur le robot reel).
-COM_LAT_SCALE = 0.8   # 1.0 = balancement lateral complet calcule par le planificateur
+COM_LAT_SCALE = 0.9   # 1.0 = balancement lateral complet calcule par le planificateur
 COM_FWD_TRIM = 0.0    # m, > 0 penche le robot vers l'avant
+COM_LAT_TRIM = 0.006  # m, > 0 decale le robot vers sa droite
 
 def _skew(v: np.ndarray) -> np.ndarray:
     v = np.asarray(v, dtype=float).reshape(3)
@@ -147,7 +148,7 @@ class Robot:
         )
         self.walk_config = WalkConfig(
             ssp_duration=0.6,
-            dsp_duration=0.15,
+            dsp_duration=0.3,
             step_length=0.04,
         )
         
@@ -303,7 +304,7 @@ class Robot:
         
     def ik(self,
        ik_target: IKTarget,
-       max_iters: int = 80,
+       max_iters: int = 40,
        tol: float = 0.01,
        damping: float = 3e-2,
        step: float = 0.05,
@@ -457,7 +458,7 @@ class Robot:
         d_f = d_xy @ fwd
         d_l = d_xy @ lat
         self.d_f = d_f
-        com_xy = center_xy + (d_f + COM_FWD_TRIM) * fwd + (COM_LAT_SCALE * d_l) * lat
+        com_xy = center_xy + (d_f + COM_FWD_TRIM) * fwd + (COM_LAT_SCALE * d_l + COM_LAT_TRIM) * lat
         com_pos = np.array([com_xy[0], com_xy[1], com_pos_nominal[2]])
         return IKTarget(
             left_foot_pose=self.fsm.stance.left_foot,

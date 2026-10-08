@@ -9,6 +9,7 @@ import numpy as np
 import time
 from loop_rate_limiters import RateLimiter
 import argparse
+from imu_remote import ImuClient
 
 
 # Real robot only. Positive values shift each step to the robot's left.
@@ -18,6 +19,10 @@ import argparse
 LATERAL_COMP_ENABLED = False
 LATERAL_COMP_FORWARD_LEFT_M = 0.03
 LATERAL_COMP_BACKWARD_LEFT_M = 0.05
+
+# Arret : le robot recentre son poids avant de revenir a la pose debout.
+STAND_SETTLE_MAX = 1.5   # s, duree maximale du recentrage
+STAND_SLEW = 0.004       # rad par tick, vitesse du retour a la pose debout (0,13 rad/s)
 
 class JoystickButton(Enum):
     A = 0
@@ -29,9 +34,46 @@ class JoystickButton(Enum):
     START = 7
 
 class Demo(Robot):
-    def __init__(self, enable_teleop=False):
+    def __init__(self, enable_teleop=False, imu=None):
         super().__init__()
         self.enable_teleop = enable_teleop
+        # Centrale inertielle : lecture et enregistrement seulement, aucune correction.
+        self.imu = imu
+        self.imu_log = None
+        if imu is not None:
+            name = time.strftime('imu_log_%Y%m%d_%H%M%S.csv')
+            self.imu_log = open(name, 'w')
+            self.imu_log.write('t,etat,cmd_avant,cmd_cote,cmd_rot,tangage,roulis,vit_tangage,vit_roulis,age,'
+                               'tangage_prevu,roulis_prevu,rejets,calcul_ms,cap\n')
+            print(f'centrale inertielle : enregistrement dans {name}')
+
+    def leg_targets(self, last_legs, stand_legs, dt):
+        """Consignes des 12 articulations des jambes pour ce tick."""
+        fsm = self.fsm
+        if fsm.state != WalkState.STAND:
+            self._settle_t = 0.0
+        elif self._settle_t is not None:
+            self._settle_t += dt
+            com = fsm.stance.com
+            mid = 0.5 * (fsm.stance.left_foot.position[:2] + fsm.stance.right_foot.position[:2])
+            centered = (np.linalg.norm(com.position[:2] - mid) < 0.003
+                        and np.linalg.norm(com.velocity[:2]) < 0.01)
+            if centered or self._settle_t > STAND_SETTLE_MAX:
+                self._settle_t = None
+        if self._settle_t is not None:      # en marche, ou recentrage juste apres l'arret
+            self.q, success = self.ik(self._get_targets())
+            return self.safe_leg_q(self.q, last_legs, success)
+        self.q = self.default_q.copy()
+        # Toutes les articulations avancent ensemble, a la meme fraction du trajet restant.
+        diff = stand_legs - last_legs
+        biggest = float(np.abs(diff).max())
+        return last_legs + diff * min(1.0, STAND_SLEW / biggest) if biggest > 0 else stand_legs.copy()
+
+    def planned_tilt(self):
+        """Inclinaison du torse prevue par l'IK, en degres : (tangage, + = avant ; roulis, + = droite)."""
+        x, y, z, w = self.q[3:7]
+        gx, gy, gz = 2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)
+        return np.degrees(np.arctan2(-gy, gz)), np.degrees(np.arctan2(-gx, gz))
 
     def wait_for_button(self, button_id):
         while self.joystick.get_button(button_id) == 0:
@@ -78,12 +120,15 @@ class Demo(Robot):
             else:
                 print('lateral comp off')
             self.q = self.default_q.copy()
+            self._settle_t = None
             leg_idxs = motor_manager.get_sim_idxs('leg')
-            last_legs = np.array(stand_qpos[leg_idxs], dtype=float).copy()
+            stand_legs = np.array(stand_qpos[leg_idxs], dtype=float)
+            last_legs = stand_legs.copy()
             ignore_cmd_until = time.perf_counter() + 0.5
             tick = 0
             t_report = time.perf_counter()
             while True:
+                t_tick = time.perf_counter()
                 current_button = self.get_current_button()
                 if current_button is not None:
                     return current_button
@@ -94,23 +139,36 @@ class Demo(Robot):
                 self.fsm.on_tick()
 
                 q_full = np.array(stand_qpos, dtype=float).copy()
-                if self.fsm.state != WalkState.STAND:
-                    self.q, success = self.ik(self._get_targets())
-                    last_legs = self.safe_leg_q(self.q, last_legs, success)
-                    q_full[leg_idxs] = last_legs
-                else:
-                    last_legs = np.array(stand_qpos[leg_idxs], dtype=float).copy()
-                    self.q = self.default_q.copy()
+                last_legs = self.leg_targets(last_legs, stand_legs, dt)
+                q_full[leg_idxs] = last_legs
 
                 motor_manager.set_positions(q_full, 0, 30)
+                calc_ms = (time.perf_counter() - t_tick) * 1000.0   # duree du calcul de ce tick
                 rate_limiter.sleep()
+
+                imu_txt = ''
+                if self.imu is not None:
+                    sample = self.imu.get()
+                    if sample is None:
+                        imu_txt = '  centrale : pas de mesure'
+                    else:
+                        pitch, roll, pitch_rate, roll_rate, age = sample
+                        imu_txt = f'  tangage {pitch:+5.1f}  roulis {roll:+5.1f}  cap {self.imu.yaw:+6.1f}  (age {age * 1000:.0f} ms)'
+                        c = self.fsm.cmd
+                        plan_pitch, plan_roll = self.planned_tilt()
+                        self.imu_log.write(
+                            f'{time.perf_counter():.3f},{self.fsm.state.name},{c[0]:.2f},{c[1]:.2f},{c[2]:.2f},'
+                            f'{pitch:.2f},{roll:.2f},{pitch_rate:.2f},{roll_rate:.2f},{age:.3f},'
+                            f'{plan_pitch:.2f},{plan_roll:.2f},{self.imu.i2c_errors},{calc_ms:.1f},{self.imu.yaw:.2f}\n')
 
                 tick += 1
                 if tick % 15 == 0:
                     now = time.perf_counter()
                     hz = 15.0 / max(now - t_report, 1e-6)
                     t_report = now
-                    print(f'{hz:.1f} Hz  state {self.fsm.state.name}  cmd {self.fsm.cmd}')
+                    print(f'{hz:.1f} Hz  state {self.fsm.state.name}  cmd {self.fsm.cmd}{imu_txt}')
+                    if self.imu_log is not None:
+                        self.imu_log.flush()
         except KeyboardInterrupt:
             motor_manager.disable_torque()
     
@@ -190,7 +248,9 @@ if __name__ == '__main__':
     parser.add_argument('--host', type=str, default='0.0.0.0', help='Host IP for remote mode')
     parser.add_argument('--teleop', action='store_true', help='Whether to run teleoperation demo')
     parser.add_argument('--config', type=str, default='sundaya1_real_config_short.yaml', help='Path to configuration file')
+    parser.add_argument('--imu', action='store_true', help='Lire la centrale inertielle du Pi (scripts/imu_sender.py doit y tourner)')
     args = parser.parse_args()
     
-    demo = Demo(enable_teleop=args.teleop)
+    imu = ImuClient(args.host) if args.imu else None
+    demo = Demo(enable_teleop=args.teleop, imu=imu)
     demo.run(is_remote=args.remote, host=args.host, config_path=args.config)

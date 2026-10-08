@@ -1,1 +1,16 @@
 *.pyc
+__pycache__/
+
+# Enregistrements des essais
+imu_log_*.csv
+legs_log_*.csv
+
+# Copies deposees par Claude
+Claude outputs/
+
+# Sorties d'entrainement (modeles, checkpoints, journaux)
+vibe_training/runs/
+*.zip
+
+# Description du modele MuJoCo generee
+MJMODEL.TXT
