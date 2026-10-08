@@ -1,0 +1,63 @@
+VIBE A1 - V5 : CORRIGER L'AVANTAGE DES CHUTES PRECOCES
+
+EXTRAIRE vibe_training dans le SDK, remplacer les fichiers et inclure le nouveau
+fichier episode_rules.py. Les anciens dossiers runs restent conserves.
+
+PREMIER LANCEMENT : CONTROLES ET EVALUATION, AUCUN APPRENTISSAGE
+& "$env:USERPROFILE\.venvs\vibe-training\Scripts\python.exe" .\vibe_training\train.py --sdk . --stage stepping --warmstart .\vibe_training\runs\essai4\checkpoints\marche_50000_steps.zip --audit-only
+
+Ce lancement doit afficher CONTROLE DU SCORE, CONTROLE ECHEC, le transfert du
+reseau, puis DEPLACEMENT / PIEDS / SURVIE / CRITERE APPUIS et AUDIT TERMINE.
+Il ne met pas a jour les poids. Il peut enregistrer la politique transferee dans
+runs/essai5/best_trajectory.zip pour la visualisation.
+Le point de depart V4 a 50000 pas tenait 12 secondes (droit 76%, gauche 12%).
+
+REGLES CORRIGEES
+Chaque episode compte exactement 400 commandes de 0.03 s : 12 secondes.
+Les recompenses physiques sont bornees entre -10 et +10 puis divisees par 10.
+Apres une chute, l'etat est fige et le pire score -1 est attribue a chaque
+commande restante. Il n'existe donc plus de suppression des penalites futures
+par une chute precoce. La duree physique reelle avant echec est rapportee
+separement de la duree d'evaluation, qui reste toujours 12 secondes.
+Les occasions de leve de pied apres echec comptent comme ratees. Un cycle
+reussi suivi d'une chute ne peut plus donner 100% sur tout l'episode.
+Le temps restant et l'indicateur d'echec sont ajoutes aux observations (51 au
+lieu de 49). Les nouveaux poids du reseau de commande sont initialement nuls;
+le transfert de sorties est verifie. La flexion des genoux reste celle de V4.
+Le critic et l'optimiseur sont reinitialises pour ce nouveau calcul du score.
+
+CRITERE D'APPUI, PROVISOIRE
+Survie 12 s, au moins 6 cycles observes en vie, chacun des deux pieds reussit
+au moins 60% des occasions d'appui alterne sur l'horizon, deplacement avant
+inferieur a 10 cm en valeur absolue, derive inferieure a 5 cm, cap inferieur a
+15 degres et glissement moyen inferieur a 0.05 m/s. Cela ne valide pas encore
+une marche : une inspection visuelle reste indispensable.
+Une politique sans chute a priorite sur une politique qui chute pour la
+sauvegarde best_trajectory.zip, meme si cette derniere a un meilleur autre score.
+
+APRES VERIFICATION DU PREMIER LANCEMENT, ENTRAINEMENT COURT POSSIBLE :
+& "$env:USERPROFILE\.venvs\vibe-training\Scripts\python.exe" .\vibe_training\train.py --sdk . --stage stepping --warmstart .\vibe_training\runs\essai4\checkpoints\marche_50000_steps.zip --steps 100000 --envs 2
+
+Reprendre uniquement une sauvegarde V5 :
+& "$env:USERPROFILE\.venvs\vibe-training\Scripts\python.exe" .\vibe_training\train.py --sdk . --stage stepping --resume .\vibe_training\runs\essai5\last_model.zip --steps 100000 --envs 2
+
+Afficher la politique V5 :
+& "$env:USERPROFILE\.venvs\vibe-training\Scripts\python.exe" .\vibe_training\watch.py --sdk . --stage stepping
+Le visualiseur redemarre apres echec pour eviter d'afficher une pose figee; cela
+ne modifie pas la regle de score de l'entrainement ni celle des evaluations.
+
+VERIFICATIONS ET LIMITES
+episode_rules.py contient les controles de duree, bornes du score, persistance
+et classement de chutes precoces/tardives, avec et sans actualisation gamma.
+train.py verifie aussi un etat d'echec force dans l'environnement : pas de
+mouvement physique, maintien des penalites et des statistiques jusqu'a 12 s.
+Ces tests et le transfert sont executes automatiquement au lancement sur votre
+PC. L'assistant n'a pas pu executer Python dans sa session; verification locale
+statique et mathematique uniquement. Ces corrections traitent un defaut du
+programme d'apprentissage, elles ne garantissent pas sa convergence.
+Aucune connexion aux moteurs reels. Cette etape vise encore les appuis sur
+place; avance, recul et virages restent a realiser. Les hypotheses physiques
+(couple, vitesse, inertie, gains, jeux et delais) restent provisoires.
+
+Reference :
+https://gymnasium.farama.org/tutorials/gymnasium_basics/handling_time_limits/
