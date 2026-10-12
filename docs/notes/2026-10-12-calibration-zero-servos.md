@@ -21,8 +21,11 @@
 - Référence (modèle, tout à 0) : bras pendant à la verticale, coude tendu, épaule/coude/poignet alignés de face et de profil. Tous calibrés le 12 oct.
 
 ## Code
-- `robot.py` : `TORSO_PITCH_TRIM_DEG` 5.0 → 2.0 (objectif tangage ≈ −2° à l'arrêt). `COM_LAT_TRIM` 0.006 inchangé, à revalider (rotation hanche D modifiée).
+- `robot.py` : `TORSO_PITCH_TRIM_DEG` 5.0 → 2.0 (objectif tangage ≈ −2° à l'arrêt).
+- `robot.py` : `COM_LAT_TRIM` 0.006 → 0.003 → 0.0. Le décalage latéral n'avait presque plus d'effet après calibration.
 
-## À faire
-- Premier essai : tangage à l'arrêt (viser −2°), puis 4 mouvements à demi-stick avec cordon, puis vérifier la dérive en marche avant.
-- Après un redémarrage, `a` puis `p` : la jambe droite doit reprendre la même forme (sinon jeu / servo 11 qui bouge dans son logement).
+## Rotation en marche avant/arrière (après calibration)
+- Le robot tournait à droite en avant et à gauche en arrière, ~1–3°/pas (cap de la centrale), quel que soit `COM_LAT_TRIM` (6, 3, 0 mm).
+- Journaux des jambes : la rotation de hanche suit la consigne à 0,1–0,3° près ; angle entre les pieds ±0,9° selon le sens (souplesse des servos), trop faible pour expliquer le cap. Conclusion : pivot des pieds sur le plancher de bois verni.
+- Solution retenue : semelles TPU 95A collées sous les pieds (`docs/gabarit/semelle_tpu_1_2mm.stl`, 76,2 × 171,2 × 1,2 mm, coins r 15,5, chanfrein 0,6 mm côté sol ; même pièce pour les deux pieds). Résultat : « pratiquement parfait », aucune compensation dans le code.
+- En rotation sur place, la rotation de hanche réelle dépasse la consigne d'environ 30 % au moment de la pose (9,7° pour 7,2°) — noté, non traité.
