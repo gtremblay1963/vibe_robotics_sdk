@@ -20,6 +20,18 @@ from viberobotics.motor.ftservo_python_sdk.scservo_sdk.sms_sts import (
     COMM_SUCCESS, SMS_STS_PRESENT_POSITION_L, SMS_STS_PRESENT_SPEED_L, SMS_STS_PRESENT_LOAD_L)
 
 
+ANKLE_PITCH_IDS = (11, 23)   # chevilles avant-arriere (droite, gauche)
+
+
+def set_ankle_gain(manager, kp, kd):
+    """Raideur des deux chevilles avant-arriere (valeur d'origine des STS3215 : P = 32, D = 32)."""
+    handler = manager.controllers_mapping['leg'].packetHandler
+    for i in ANKLE_PITCH_IDS:
+        handler.WriteKpKd(i, kp, kd)
+        rkp, rkd, res, err = handler.ReadKpKd(i)
+        print(f'cheville servo {i} : P = {rkp}, D = {rkd} (com {res}, err {err})')
+
+
 def run(manager, log_path, acc=50):
     leg = manager.controllers_mapping['leg']
     ids = [int(i) for i in leg.motor_ids]
@@ -75,6 +87,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='sundaya1_real_config_short.yaml')
     parser.add_argument('--acc', type=int, default=50, help='acceleration des servos (50 = valeur d origine)')
+    parser.add_argument('--ankle-kp', type=int, default=None, help='raideur P des chevilles avant-arriere (origine : 32)')
+    parser.add_argument('--ankle-kd', type=int, default=32, help='amortissement D des chevilles (origine : 32)')
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -86,4 +100,6 @@ if __name__ == "__main__":
         remote=True,
         sender=False,
     )
+    if args.ankle_kp is not None:
+        set_ankle_gain(motor_controller_manager, args.ankle_kp, args.ankle_kd)
     run(motor_controller_manager, time.strftime('legs_log_%Y%m%d_%H%M%S.csv'), args.acc)

@@ -30,6 +30,9 @@ pygame.event.pump()
 COM_LAT_SCALE = 0.9   # 1.0 = balancement lateral complet calcule par le planificateur
 COM_FWD_TRIM = 0.0    # m, > 0 penche le robot vers l'avant
 COM_LAT_TRIM = 0.006  # m, > 0 decale le robot vers sa droite
+# Le torse reel penche vers l'arriere de 6 a 8 deg quand toutes les articulations sont a 0.
+# L'IK le tient penche vers l'avant de cet angle (pose debout et marche), pieds a plat.
+TORSO_PITCH_TRIM_DEG = 5.0   # deg, > 0 penche le torse vers l'avant
 
 def _skew(v: np.ndarray) -> np.ndarray:
     v = np.asarray(v, dtype=float).reshape(3)
@@ -132,6 +135,12 @@ def _yaw_align_to_plus_y(R_flat: np.ndarray, local_fwd: np.ndarray) -> np.ndarra
 
     return _rotz(delta) @ R_flat
 
+def Rx(theta: float) -> np.ndarray:
+    c, s = np.cos(theta), np.sin(theta)
+    return np.array([[1.0, 0.0, 0.0],
+                     [0.0, c, -s],
+                     [0.0, s, c]], dtype=float)
+
 def Rz(theta: float) -> np.ndarray:
     c = float(np.cos(theta))
     s = float(np.sin(theta))
@@ -171,6 +180,25 @@ class Robot:
         self._init_walking()
         self._init_joystick()
         self._init_ik()
+        self._init_stand_pose()
+
+    def _init_stand_pose(self):
+        """Pose debout de reference : torse penche de TORSO_PITCH_TRIM_DEG, pieds a plat, COM au centre."""
+        if TORSO_PITCH_TRIM_DEG == 0.0:
+            return
+        global COM_LAT_TRIM
+        self.fsm.set_cmd(np.zeros(3))
+        self.q = self.default_q.copy()
+        lat_trim, COM_LAT_TRIM = COM_LAT_TRIM, 0.0   # debout : pieds et poids centres ; le decalage ne sert qu'en marche
+        try:
+            for _ in range(10):
+                self.q, ok = self.ik(self._get_targets())
+        finally:
+            COM_LAT_TRIM = lat_trim
+        self.default_q[7:] = np.clip(self.q[7:], self.joint_lower, self.joint_upper)
+        self.q = self.default_q.copy()
+        if not ok:
+            print('attention : pose debout corrigee approximative (IK non convergee)')
         
     def _init_walking(self):
         self.fsm = WalkingFSMPreview(
@@ -374,7 +402,7 @@ class Robot:
             # base orientation error (world): log(Rdes * Rcur^T)+
                 # current base rotation
             Rcur_B = oMfB.rotation
-            Rdes_B_w = Rz(-ik_target.heading)
+            Rdes_B_w = Rz(-ik_target.heading) @ Rx(-np.radians(TORSO_PITCH_TRIM_DEG))
             Rerr = Rdes_B_w @ Rcur_B.T
             yaw_err = float(np.arctan2(Rerr[1,0], Rerr[0,0]))  # yaw error about +Z
             eC_ori = np.array([yaw_err])
