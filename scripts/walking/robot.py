@@ -30,9 +30,9 @@ pygame.event.pump()
 COM_LAT_SCALE = 0.9   # 1.0 = balancement lateral complet calcule par le planificateur
 COM_FWD_TRIM = 0.0    # m, > 0 penche le robot vers l'avant
 COM_LAT_TRIM = 0.006  # m, > 0 decale le robot vers sa droite
-# Le torse reel penche vers l'arriere de 6 a 8 deg quand toutes les articulations sont a 0.
+# Apres calibration du zero (12 oct.), le torse reel penche de ~2,3 deg vers l'arriere a 0.
 # L'IK le tient penche vers l'avant de cet angle (pose debout et marche), pieds a plat.
-TORSO_PITCH_TRIM_DEG = 5.0   # deg, > 0 penche le torse vers l'avant
+TORSO_PITCH_TRIM_DEG = 2.0   # deg, > 0 penche le torse vers l'avant
 
 def _skew(v: np.ndarray) -> np.ndarray:
     v = np.asarray(v, dtype=float).reshape(3)
