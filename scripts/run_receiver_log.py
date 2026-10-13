@@ -87,7 +87,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='sundaya1_real_config_short.yaml')
     parser.add_argument('--acc', type=int, default=50, help='acceleration des servos (50 = valeur d origine)')
-    parser.add_argument('--ankle-kp', type=int, default=None, help='raideur P des chevilles avant-arriere (origine : 32)')
+    parser.add_argument('--ankle-kp', type=int, default=64, help='raideur P des chevilles avant-arriere (origine : 32, 64 valide le 11 oct.)')
     parser.add_argument('--ankle-kd', type=int, default=32, help='amortissement D des chevilles (origine : 32)')
     args = parser.parse_args()
 

@@ -158,7 +158,7 @@ class Robot:
         self.walk_config = WalkConfig(
             ssp_duration=0.6,
             dsp_duration=0.3,
-            step_length=0.04,
+            step_length=0.05,
         )
         
         self.robot = pin.RobotWrapper.BuildFromMJCF(filename=self.config.xml_path, root_joint=None)

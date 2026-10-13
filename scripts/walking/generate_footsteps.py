@@ -48,9 +48,12 @@ class FootstepGenerator:
                  foot_spread: float,
                  initial_y: float = 0.0,
                  steering_strength: float = np.deg2rad(10.),
-                 straight_yaw_trim: float = 0.0):
+                 straight_yaw_trim: float = 0.0,
+                 lateral_step_length: float = 0.04):
         # assume starts at [+foot_spread, initial_y], [-foot_spread, initial_y]
         self.step_length = step_length
+        # Pas de cote a fond de stick, separe du pas avant : 5 cm faisait glisser et tomber de cote.
+        self.lateral_step_length = lateral_step_length
         self.foot_spread = foot_spread # half foot distance
         self.steering_strength = steering_strength
         # Radians of left yaw added each step on a straight walk.
@@ -105,7 +108,7 @@ class FootstepGenerator:
 
         # scale commands
         d_fwd  = float(cmd[0]) * self.step_length
-        d_lat  = float(cmd[1]) * self.step_length   # or a separate lateral_step_length
+        d_lat  = float(cmd[1]) * self.lateral_step_length
         # Positive d_lat moves the reference left. Zero while stopped.
         d_lat += self._slew_lateral_comp(float(cmd[0]))
         dtheta = float(cmd[2]) * self.steering_strength
