@@ -17,10 +17,49 @@ from viberobotics.configs.config import load_config
 from viberobotics.motor.motor_controller_manager import MotorControllerManager
 from viberobotics.motor.ftservo_python_sdk.scservo_sdk.group_sync_read import GroupSyncRead
 from viberobotics.motor.ftservo_python_sdk.scservo_sdk.sms_sts import (
-    COMM_SUCCESS, SMS_STS_PRESENT_POSITION_L, SMS_STS_PRESENT_SPEED_L, SMS_STS_PRESENT_LOAD_L)
+    COMM_SUCCESS, SMS_STS_PRESENT_POSITION_L, SMS_STS_PRESENT_SPEED_L, SMS_STS_PRESENT_LOAD_L,
+    SMS_STS_TORQUE_ENABLE)
 
 
 ANKLE_PITCH_IDS = (11, 23)   # chevilles avant-arriere (droite, gauche)
+ARM_IDS = (1, 2, 3, 4, 5, 13, 14, 15, 16, 17)
+GRIPPER_IDS = (6, 18)
+TORQUE_LIMIT_ADDR = 48       # STS3215 : limite de couple en RAM, 0 a 1000 (0,1 %), remise a 100 % a la mise sous tension
+HORS_SERVICE = ''            # servos en panne, sans couple (ex. '4') ; coude droit remplace le 2026-10-28
+
+
+def couper_servos(handler_of, ids):
+    """Servos en panne : limite de couple a 0 et couple coupe. Ils ne forcent plus et ne chauffent plus,
+    meme si une consigne de position leur arrive (la limite a 0 reste jusqu'a la mise hors tension)."""
+    for i in ids:
+        h = handler_of(i)
+        before, res, err = h.read2ByteTxRx(i, TORQUE_LIMIT_ADDR)
+        if res != COMM_SUCCESS:
+            print(f'servo {i} : hors service, ne repond pas (com {res})')
+            continue
+        if 0 <= before <= 1000:
+            h.write2ByteTxRx(i, TORQUE_LIMIT_ADDR, 0)
+        h.write1ByteTxRx(i, SMS_STS_TORQUE_ENABLE, 0)
+        after, res, err = h.read2ByteTxRx(i, TORQUE_LIMIT_ADDR)
+        print(f'servo {i} : HORS SERVICE, couple coupe (limite {before / 10:.0f} % -> {after / 10:.0f} %)')
+
+
+def liste_ids(texte):
+    return [int(x) for x in texte.replace(' ', '').split(',') if x]
+
+
+def set_torque_limit(manager, ids, percent):
+    """Limite la force des servos : en cas de choc, le servo cale au lieu de casser la piece.
+    Ecrit seulement si la valeur relue avant a l'allure attendue (sinon, l'adresse serait fausse)."""
+    handler = manager.controllers_mapping['arm'].packetHandler
+    for i in ids:
+        before, res, err = handler.read2ByteTxRx(i, TORQUE_LIMIT_ADDR)
+        if res != COMM_SUCCESS or not 100 <= before <= 1000:
+            print(f'servo {i} : limite de couple non modifiee (lecture {before}, com {res}) ; verifier l adresse')
+            continue
+        handler.write2ByteTxRx(i, TORQUE_LIMIT_ADDR, int(percent * 10))
+        after, res, err = handler.read2ByteTxRx(i, TORQUE_LIMIT_ADDR)
+        print(f'servo {i} : limite de couple {before / 10:.0f} % -> {after / 10:.0f} %')
 
 
 def set_ankle_gain(manager, kp, kd):
@@ -89,6 +128,10 @@ if __name__ == "__main__":
     parser.add_argument('--acc', type=int, default=50, help='acceleration des servos (50 = valeur d origine)')
     parser.add_argument('--ankle-kp', type=int, default=64, help='raideur P des chevilles avant-arriere (origine : 32, 64 valide le 11 oct.)')
     parser.add_argument('--ankle-kd', type=int, default=32, help='amortissement D des chevilles (origine : 32)')
+    parser.add_argument('--bras-couple', type=float, default=100, help='limite de couple des bras en %% (100 = aucune limite)')
+    parser.add_argument('--pince-couple', type=float, default=30, help='limite de couple des pinces en %% (100 = aucune limite)')
+    parser.add_argument('--hors-service', default=HORS_SERVICE,
+                        help="servos sans couple, ex. 4 ou 4,16 ('' = aucun, une fois le servo remplace)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -102,4 +145,8 @@ if __name__ == "__main__":
     )
     if args.ankle_kp is not None:
         set_ankle_gain(motor_controller_manager, args.ankle_kp, args.ankle_kd)
+    set_torque_limit(motor_controller_manager, ARM_IDS, args.bras_couple)
+    set_torque_limit(motor_controller_manager, GRIPPER_IDS, args.pince_couple)
+    ctrl_of = {int(i): c for c in motor_controller_manager.controllers for i in c.motor_ids}
+    couper_servos(lambda i: ctrl_of[i].packetHandler, liste_ids(args.hors_service))
     run(motor_controller_manager, time.strftime('legs_log_%Y%m%d_%H%M%S.csv'), args.acc)

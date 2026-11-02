@@ -10,6 +10,11 @@ import time
 from loop_rate_limiters import RateLimiter
 import argparse
 from imu_remote import ImuClient
+import os
+from actions import Executeur, charger_poses_bras, METRES_PAR_PAS
+from comprendre import Comprehension
+import commande_web
+import postures_jambes as PJ
 
 
 # Real robot only. Positive values shift each step to the robot's left.
@@ -23,11 +28,15 @@ LATERAL_COMP_BACKWARD_LEFT_M = 0.05
 # Arret : le robot recentre son poids avant de revenir a la pose debout.
 STAND_SETTLE_MAX = 1.5   # s, duree maximale du recentrage
 STAND_SLEW = 0.004       # rad par tick, vitesse du retour a la pose debout (0,13 rad/s)
+REPLI_SLEW = 0.02        # rad par tick : pied repose en urgence (~0,3 s)
+POSTURE_SLEW = 0.012     # rad par tick : postures de jambes (pied leve, accroupi, penche), 3 fois STAND_SLEW
+PLIE_SLEW = 0.03         # rad par tick : pliage de la jambe levee (sans charge), ~1 s
+PIED_URGENCE_DEG = 22.0  # sur un pied, le torse penche de ~10 deg (prevu, TORSE_ROULIS) : au-dela, pied repose
 
 # Protection : la marche s'arrete si le torse s'incline trop par rapport a la pose
-# mesuree au demarrage. Marche au stick : jamais plus de 10 deg pendant 0,15 s en marche normale.
-SAFETY_TILT_DEG = 10.0
-SAFETY_TIME = 0.15       # s au-dela du seuil avant l'arret
+# mesuree au demarrage. La marche normale atteint 12 deg de roulis en virage (journaux du 2026-10-16) : seuil a 20 deg pendant 0,3 s.
+SAFETY_TILT_DEG = 20.0
+SAFETY_TIME = 0.30       # s au-dela du seuil avant l'arret
 
 # Bouton RB, robot arrete : retour au cap pris au demarrage (appui sur Start).
 HOME_TOL_DEG = 3.0       # ecart accepte a la fin
@@ -38,6 +47,7 @@ HOME_SETTLE = 1.0        # s d'immobilite avant de mesurer l'ecart
 
 # Poussee a l'arret : si le torse penche de plus de PUSH_ON_DEG vers l'avant (ou l'arriere)
 # par rapport a la pose de reference, le robot fait des pas dans ce sens jusqu'a se redresser.
+PUSH_ENABLE = False      # pas de rattrapage apres une poussee : desactive (2026-10-19, juge inutile)
 PUSH_ON_DEG = 7.0        # declenchement (reference -2 affiche -> +5 affiche)
 PUSH_LEAD = 0.25         # s : on anticipe l'inclinaison avec sa vitesse (declenche plus tot si ca bascule vite)
 PUSH_MIN_DEG = 3.0       # ... mais jamais sous cet ecart reel
@@ -61,9 +71,12 @@ class JoystickButton(Enum):
     START = 7
 
 class Demo(Robot):
-    def __init__(self, enable_teleop=False, imu=None):
+    def __init__(self, enable_teleop=False, imu=None, commandes=False, poses_path=None, port=8091):
         super().__init__()
         self.enable_teleop = enable_teleop
+        # Commandes en phrases (page web, plus tard la voix) : voir actions.py et comprendre.py.
+        self.commandes, self.poses_path, self.port = commandes, poses_path, port
+        self.executeur = None
         # Centrale inertielle : lecture et enregistrement seulement, aucune correction.
         self.imu = imu
         self._rb_prev = False
@@ -88,14 +101,33 @@ class Demo(Robot):
                         and np.linalg.norm(com.velocity[:2]) < 0.01)
             if centered or self._settle_t > STAND_SETTLE_MAX:
                 self._settle_t = None
+        ex = self.executeur
         if self._settle_t is not None:      # en marche, ou recentrage juste apres l'arret
+            if ex is not None:
+                ex.jambes_atteinte = None
             self.q, success = self.ik(self._get_targets())
             return self.safe_leg_q(self.q, last_legs, success)
         self.q = self.default_q.copy()
+        # Arret : pose debout, ou posture de jambes demandee (pied leve, accroupi) par les commandes.
+        cible, slew = stand_legs, STAND_SLEW
+        if ex is not None and self.postures is not None:
+            cible = self.postures[ex.posture_cible]
+            if ex.repli_rapide:
+                slew = REPLI_SLEW
+            elif ex.jambes_actives or ex.posture_cible != 'normal':
+                slew = PLIE_SLEW if {self._posture_prec, ex.posture_cible} in PJ.PLIAGES else POSTURE_SLEW
         # Toutes les articulations avancent ensemble, a la meme fraction du trajet restant.
-        diff = stand_legs - last_legs
+        diff = cible - last_legs
         biggest = float(np.abs(diff).max())
-        return last_legs + diff * min(1.0, STAND_SLEW / biggest) if biggest > 0 else stand_legs.copy()
+        legs = last_legs + diff * min(1.0, slew / biggest) if biggest > 0 else cible.copy()
+        if ex is not None:
+            atteinte = biggest <= slew
+            ex.jambes_atteinte = ex.posture_cible if atteinte else None
+            if atteinte:
+                self._posture_prec = ex.posture_cible
+            if atteinte and ex.repli_rapide:
+                ex.repli_rapide = False
+        return legs
 
     def reset_supervisor(self):
         """Oublie la pose de reference : elle sera reprise au prochain demarrage."""
@@ -161,6 +193,7 @@ class Demo(Robot):
             self.set_step_timing(fast=False)
         # Protection anti-chute (seuil releve pendant les pas de rattrapage).
         tilt = max(abs(ep), abs(roll - self._ref[1]))
+        self._tilt = tilt
         limit = SAFETY_TILT_DEG if np.any(cmd != 0.0) else SAFETY_PUSH_DEG   # seuil bas seulement en marche au stick
         self._safety_t = self._safety_t + dt if tilt > limit else 0.0
         if self._safety_t >= SAFETY_TIME and not self._safety_on:
@@ -181,7 +214,7 @@ class Demo(Robot):
             # l'arret du rattrapage fait lui-meme pencher le robot (sinon : va-et-vient sans fin).
             self._push_rearm = self._push_rearm - dt if standing else PUSH_REARM
             ep_pred = ep + PUSH_LEAD * self._ep_rate
-            if (standing and self._push_rearm <= 0.0 and abs(ep_pred) > PUSH_ON_DEG
+            if (PUSH_ENABLE and standing and self._push_rearm <= 0.0 and abs(ep_pred) > PUSH_ON_DEG
                     and abs(ep) > PUSH_MIN_DEG and ep * ep_pred > 0):
                 self._push_t += dt
                 if self._push_t >= PUSH_TIME:
@@ -307,6 +340,12 @@ class Demo(Robot):
             # torse redresse (TORSO_PITCH_TRIM_DEG dans robot.py). Le passage se fait au pas de STAND_SLEW.
             last_legs = np.array(stand_qpos[leg_idxs], dtype=float)
             stand_legs = self.default_q[7:].copy()
+            self.postures = None
+            if self.executeur is not None:
+                self.postures = PJ.calculer(self)
+                self.executeur.posture_cible, self.executeur.repli_rapide = 'normal', False
+                print(f'[victor] postures de jambes : {", ".join(sorted(self.postures))}')
+            self._posture_prec = 'normal'
             ignore_cmd_until = time.perf_counter() + 0.5
             self.reset_supervisor()
             tick = 0
@@ -323,13 +362,31 @@ class Demo(Robot):
                 cmd = self.get_joystick_cmd()
                 if time.perf_counter() < ignore_cmd_until:
                     cmd = np.zeros(3)
-                cmd, mode = self.supervise(np.array(cmd, dtype=float), dt)
+                cmd = np.array(cmd, dtype=float)
+                if self.executeur is not None:
+                    if np.any(cmd != 0.0) and self.executeur.pret_a_marcher():   # la manette a priorite...
+                        self.executeur.arreter('manette')
+                    else:                                     # ... mais si les bras sont leves, ils descendent d'abord
+                        if np.any(cmd != 0.0):
+                            cmd = np.zeros(3)
+                        yaw = self.imu.yaw if (self.imu is not None and self._ref is not None) else None
+                        ex_cmd = self.executeur.tick(dt, self.fsm.state, yaw)
+                        if ex_cmd is not None:
+                            cmd = ex_cmd
+                cmd, mode = self.supervise(cmd, dt)
+                if (self.executeur is not None and self.executeur.posture_cible in PJ.REPLI
+                        and getattr(self, '_tilt', 0.0) > PIED_URGENCE_DEG):
+                    self.executeur.urgence_pied(f'inclinaison {self._tilt:.0f} deg')
+                if mode == 'securite' and self.executeur is not None:
+                    self.executeur.arreter('arret de securite')
                 self.fsm.set_cmd(cmd)
                 self.fsm.on_tick()
 
                 q_full = np.array(stand_qpos, dtype=float).copy()
                 last_legs = self.leg_targets(last_legs, stand_legs, dt)
                 q_full[leg_idxs] = last_legs
+                if self.executeur is not None:
+                    q_full[self.executeur.arm_idxs] = self.executeur.arm_q
 
                 motor_manager.set_positions(q_full, 0, 30)
                 calc_ms = (time.perf_counter() - t_tick) * 1000.0   # duree du calcul de ce tick
@@ -390,6 +447,11 @@ class Demo(Robot):
             sender=is_remote,
             host=host,
         )
+        if self.commandes:
+            poses = charger_poses_bras(self.poses_path, motor_manager.sign_change, motor_manager.motor_order)
+            self.executeur = Executeur(poses, motor_manager.get_sim_idxs('arm'), cfg.default_qpos)
+            commande_web.demarrer(self.executeur, Comprehension(METRES_PAR_PAS), self.port)
+            print(f'[victor] {len(poses)} poses de bras : {", ".join(sorted(poses)) or "aucune"}')
         input('start>')
         if self.enable_teleop:
             leader_cfg = load_config('sundaya1_real_config_short_arm.yaml')
@@ -405,6 +467,9 @@ class Demo(Robot):
         while True:
             button = self.deploy_controller(motor_manager, cfg.default_qpos)
             print(f'Button {button} pressed')
+            if self.executeur is not None:                    # un bouton annule tout ; bras a la pose de depart
+                self.executeur.arreter(f'bouton {button.name}')
+                self.executeur.arm_q = np.array([cfg.default_qpos[i] for i in self.executeur.arm_idxs], dtype=float)
             self.fsm.reset_standing()
             self.q = self.default_q.copy()
             motor_manager.set_positions(cfg.default_qpos, 0, 30)
@@ -438,8 +503,12 @@ if __name__ == '__main__':
     parser.add_argument('--teleop', action='store_true', help='Whether to run teleoperation demo')
     parser.add_argument('--config', type=str, default='sundaya1_real_config_short.yaml', help='Path to configuration file')
     parser.add_argument('--imu', action='store_true', help='Lire la centrale inertielle du Pi (scripts/imu_sender.py doit y tourner)')
+    parser.add_argument('--commandes', action='store_true', help='Commandes en phrases : page http://localhost:8091')
+    parser.add_argument('--poses', type=str, default=os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'poses_pi.json'),
+                        help='Poses de bras (copie de poses.json du Pi)')
+    parser.add_argument('--port', type=int, default=8091, help='Port de la page de commandes')
     args = parser.parse_args()
     
     imu = ImuClient(args.host) if args.imu else None
-    demo = Demo(enable_teleop=args.teleop, imu=imu)
+    demo = Demo(enable_teleop=args.teleop, imu=imu, commandes=args.commandes, poses_path=args.poses, port=args.port)
     demo.run(is_remote=args.remote, host=args.host, config_path=args.config)

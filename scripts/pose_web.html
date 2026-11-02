@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Poses Vibe A1</title>
+<style>
+  :root { --bg:#f4f5f7; --card:#fff; --txt:#1d2330; --mut:#6b7280; --line:#e3e6eb;
+          --acc:#2563eb; --ok:#15803d; --warn:#b45309; --bad:#dc2626; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14171c; --card:#1d2128; --txt:#e8eaee; --mut:#9aa1ad; --line:#2c323b;
+            --acc:#5b8def; --ok:#4ade80; --warn:#fbbf24; --bad:#f87171; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.4 system-ui, sans-serif; background:var(--bg); color:var(--txt); }
+  header { position:sticky; top:0; z-index:5; background:var(--card); border-bottom:1px solid var(--line);
+           padding:10px 16px; display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:17px; margin:0 8px 0 0; }
+  #stop { margin-left:auto; background:var(--bad); color:#fff; border:0; border-radius:10px;
+          font-size:20px; font-weight:700; padding:12px 28px; cursor:pointer; }
+  .pill { padding:3px 10px; border-radius:99px; background:var(--bg); color:var(--mut); font-size:13px; }
+  .pill.on { color:var(--warn); } .pill.mv { color:var(--acc); } .pill.bad { color:var(--bad); }
+  main { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:14px;
+         padding:14px 16px; align-items:start; }
+  @media (max-width: 1200px) { main { grid-template-columns:repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 760px)  { main { grid-template-columns:minmax(0, 1fr); } }
+  section { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; min-width:0; }
+  .item { display:flex; flex-wrap:wrap; align-items:center; gap:6px; padding:7px 0; border-bottom:1px solid var(--line); }
+  .item .name { flex:1 1 130px; min-width:0; overflow-wrap:anywhere; }
+  .item select { flex:1 1 120px; }
+  .item.with { margin-left:22px; padding-left:8px; border-left:3px solid var(--acc); }
+  .num { width:20px; color:var(--mut); font-size:13px; }
+  label.tog { display:flex; align-items:center; gap:4px; font-size:13px; color:var(--mut); white-space:nowrap; }
+  h2 { font-size:15px; margin:0 0 10px; }
+  button { font:inherit; border:1px solid var(--line); background:var(--bg); color:var(--txt);
+           border-radius:8px; padding:6px 10px; cursor:pointer; white-space:nowrap; }
+  button.pri { background:var(--acc); border-color:var(--acc); color:#fff; }
+  button.warn { color:var(--warn); }
+  button:disabled { opacity:.45; cursor:default; }
+  input, select { font:inherit; color:var(--txt); background:var(--bg); border:1px solid var(--line);
+                  border-radius:8px; padding:6px 8px; min-width:0; }
+  input.dur { width:62px; }
+  .row { display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin:6px 0; }
+  .grow { flex:1; }
+  table { width:100%; border-collapse:collapse; }
+  td, th { padding:5px 4px; border-bottom:1px solid var(--line); text-align:left; }
+  th { color:var(--mut); font-weight:500; font-size:13px; }
+  td.n { text-align:right; font-variant-numeric:tabular-nums; }
+  .mut { color:var(--mut); font-size:13px; }
+  #msg { font-size:14px; }
+  kbd { font:12px ui-monospace, monospace; border:1px solid var(--line); border-radius:5px; padding:1px 5px; }
+  #toast { position:fixed; left:50%; bottom:20px; transform:translateX(-50%); background:var(--txt);
+           color:var(--bg); padding:10px 16px; border-radius:10px; opacity:0; transition:opacity .2s; }
+  #toast.show { opacity:.95; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Poses Vibe A1</h1>
+  <span id="conn" class="pill">connexion...</span>
+  <span id="relaxed" class="pill">-</span>
+  <span id="imu" class="pill">centrale -</span>
+  <span id="msg" class="mut"></span>
+  <button id="stop" title="Fige le robot ou il est (barre d'espace, bouton B)">ARRÊT</button>
+</header>
+<main>
+  <section>
+    <h2>Servos</h2>
+    <div class="row">
+      <button onclick="relax('jambes')">Relâcher jambes</button>
+      <button onclick="relax('bras')">Relâcher bras</button>
+      <button onclick="relax('tout')">Relâcher tout</button>
+      <button class="pri" onclick="api('/api/hold')">Tenir</button>
+    </div>
+    <p class="mut">Relâcher coupe le couple : le membre se place à la main. Tenez le robot avant de relâcher les jambes.
+      « Tenir » le bloque où il est.</p>
+    <h2 style="margin-top:14px">Enregistrer la position actuelle</h2>
+    <div class="row">
+      <input id="newname" class="grow" placeholder="nom (vide = pose_01, pose_02...)">
+    </div>
+    <div class="row">
+      <select id="group" title="servos enregistres dans la pose">
+        <option value="tout">Tout le corps</option>
+        <option value="jambes">Jambes seulement</option>
+        <option value="bras">Bras seulement</option>
+      </select>
+      <button class="pri" onclick="record()">Enregistrer</button>
+    </div>
+    <p class="mut">« Jambes seulement » : la pose ne touchera pas aux bras quand on la joue (et inversement).
+      Le bouton X de la manette utilise ce choix.</p>
+  </section>
+
+  <section>
+    <h2>Poses</h2>
+    <div id="poses"></div>
+    <p class="mut" id="noposes">Aucune pose enregistrée.</p>
+  </section>
+
+  <section>
+    <h2>Séquences</h2>
+    <div class="row">
+      <select id="seqsel" class="grow" onchange="loadSeq()"></select>
+      <button onclick="newSeq()">Nouvelle</button>
+    </div>
+    <div class="row"><input id="seqname" class="grow" placeholder="nom de la séquence"></div>
+    <div id="steps"></div>
+    <div class="row">
+      <button onclick="addStep()">+ Étape</button>
+      <span class="grow"></span>
+      <button class="pri" onclick="saveSeq()">Enregistrer</button>
+      <button onclick="playSeq()">▶ Jouer</button>
+      <button class="warn" onclick="delSeq()">Supprimer</button>
+    </div>
+    <p class="mut">« En même temps » : l'étape se joue avec celle du dessus (par exemple jambes et bras ensemble),
+      pendant la plus longue des deux durées. Si deux poses touchent les mêmes servos, celle du dessous l'emporte.
+      La séquence enregistrée et sélectionnée ici est celle que joue le bouton Y.</p>
+  </section>
+
+  <section>
+    <h2>Symétrie des jambes <span class="mut">(degrés)</span></h2>
+    <table>
+      <thead><tr><th>Articulation</th><th class="n">Droite</th><th class="n">Gauche</th></tr></thead>
+      <tbody id="legs"></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Manette <span id="pad" class="mut">non détectée — appuyez sur un bouton</span></h2>
+    <table>
+      <tr><td><kbd>B</kbd></td><td>ARRÊT (fige le robot)</td></tr>
+      <tr><td><kbd>A</kbd></td><td>Tenir</td></tr>
+      <tr><td><kbd>LB</kbd> ×2</td><td>Relâcher les jambes (2 appuis en 3 s)</td></tr>
+      <tr><td><kbd>RB</kbd></td><td>Relâcher les bras</td></tr>
+      <tr><td><kbd>X</kbd></td><td>Enregistrer (nom automatique)</td></tr>
+      <tr><td><kbd>Y</kbd></td><td>Jouer la séquence sélectionnée</td></tr>
+    </table>
+    <p class="mut">Clavier : <kbd>Espace</kbd> = ARRÊT. Ne lancez pas demo.py en même temps : la manette commanderait les deux.</p>
+  </section>
+</main>
+<div id="toast"></div>
+
+<script>
+let S = null;               // dernier etat du serveur
+let editing = null;         // sequence en cours d'edition : {name, steps:[[pose, dur]]}
+
+const $ = id => document.getElementById(id);
+function toast(t) { const e = $('toast'); e.textContent = t; e.classList.add('show');
+  clearTimeout(toast.h); toast.h = setTimeout(() => e.classList.remove('show'), 2500); }
+
+async function api(path, body) {
+  try {
+    const r = await fetch(path, { method:'POST', headers:{'Content-Type':'application/json'},
+                                  body: JSON.stringify(body || {}) });
+    const j = await r.json();
+    toast(j.msg); poll();
+    return j;
+  } catch (e) { toast('pas de réponse du robot'); return { ok:false }; }
+}
+
+function relax(group) {
+  if (group !== 'bras' && !confirm('Le robot est-il tenu ou couché ? Les jambes vont lâcher.')) return;
+  api('/api/relax', { group });
+}
+function record() { api('/api/record', { name: $('newname').value.trim(), group: $('group').value }).then(j => { if (j.ok) $('newname').value = ''; }); }
+
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+function renderPoses() {
+  const tb = $('poses'); const names = S.poses;
+  $('noposes').style.display = names.length ? 'none' : '';
+  const key = names.map(n => n + ':' + S.pose_parts[n]).join('|');
+  if (tb.dataset.key === key) return;            // ne pas effacer les durees saisies
+  tb.dataset.key = key;
+  tb.innerHTML = names.map(n => `<div class="item">
+      <span class="name">${esc(n)} <span class="mut">${esc(S.pose_parts[n])}</span></span>
+      <input class="dur" type="number" min="0.3" step="0.5" value="2" title="durée (s)">
+      <button onclick="gotoPose(this, '${esc(n)}')">Aller</button>
+      <button onclick="updatePose('${esc(n)}')" title="remplacer par la position actuelle (mêmes servos)">Mettre à jour</button>
+      <button onclick="appendStep('${esc(n)}', this)" title="ajouter à la séquence">+ séq.</button>
+      <button onclick="renamePose('${esc(n)}')">Renommer</button>
+      <button class="warn" onclick="deletePose('${esc(n)}')" title="supprimer">✕</button></div>`).join('');
+}
+function durOf(btn) { return parseFloat(btn.closest('.item').querySelector('input.dur').value) || 2; }
+function gotoPose(btn, n) { api('/api/goto', { name:n, duration: durOf(btn) }); }
+function updatePose(n) {
+  if (confirm('Remplacer « ' + n + ' » par la position actuelle du robot ? (' + S.pose_parts[n] + ')'))
+    api('/api/update', { name:n });
+}
+function renamePose(n) { const v = prompt('Nouveau nom pour « ' + n + ' »', n); if (v && v !== n) api('/api/rename', { old:n, new:v }); }
+function deletePose(n) { if (confirm('Supprimer la pose « ' + n + ' » ?')) api('/api/delete', { name:n }); }
+
+// --- sequences ---
+function renderSeqList() {
+  const sel = $('seqsel'); const names = Object.keys(S.sequences).sort();
+  const key = names.join('|');
+  if (sel.dataset.key === key) return;
+  sel.dataset.key = key;
+  const cur = editing ? editing.name : sel.value;
+  sel.innerHTML = '<option value="">— choisir —</option>' +
+    names.map(n => `<option ${n === cur ? 'selected' : ''}>${esc(n)}</option>`).join('');
+}
+function loadSeq() {
+  const n = $('seqsel').value;
+  editing = n ? { name:n, steps: S.sequences[n].map(s => [s[0], s[1], !!s[2]]) } : null;
+  $('seqname').value = n; renderSteps();
+}
+function newSeq() { editing = { name:'', steps:[] }; $('seqsel').value = ''; $('seqname').value = ''; renderSteps(); }
+function ensureEditing() { if (!editing) editing = { name: $('seqname').value, steps:[] }; }
+function addStep() { ensureEditing(); if (!S.poses.length) return toast('enregistrez d\'abord une pose');
+  editing.steps.push([S.poses[0], 2, false]); renderSteps(); }
+function appendStep(n, btn) { ensureEditing(); editing.steps.push([n, durOf(btn), false]); renderSteps(); toast('« ' + n + ' » ajoutée à la séquence'); }
+function renderSteps() {
+  const tb = $('steps'); if (!editing) { tb.innerHTML = ''; return; }
+  if (editing.steps.length) editing.steps[0][2] = false;
+  let g = 0;
+  tb.innerHTML = editing.steps.map((s, i) => {
+    if (!s[2]) g++;
+    return `<div class="item${s[2] ? ' with' : ''}">
+      <span class="num">${s[2] ? '' : g}</span>
+      <select onchange="editing.steps[${i}][0]=this.value">${S.poses.map(p =>
+          `<option ${p === s[0] ? 'selected' : ''}>${esc(p)}</option>`).join('')}</select>
+      <input class="dur" type="number" min="0.3" step="0.5" value="${s[1]}"
+           onchange="editing.steps[${i}][1]=parseFloat(this.value)||2" title="durée (s)">
+      ${i ? `<label class="tog"><input type="checkbox" ${s[2] ? 'checked' : ''}
+           onchange="editing.steps[${i}][2]=this.checked;renderSteps()">en même temps</label>` : ''}
+      <button onclick="mv(${i},-1)" title="monter">↑</button><button onclick="mv(${i},1)" title="descendre">↓</button>
+      <button class="warn" onclick="editing.steps.splice(${i},1);renderSteps()" title="retirer">✕</button></div>`;
+  }).join('');
+}
+function mv(i, d) { const j = i + d; const st = editing.steps; if (j < 0 || j >= st.length) return;
+  [st[i], st[j]] = [st[j], st[i]]; renderSteps(); }
+async function saveSeq() {
+  ensureEditing(); const name = $('seqname').value.trim();
+  if (!name) return toast('donnez un nom à la séquence');
+  if (!editing.steps.length) return toast('la séquence est vide');
+  const j = await api('/api/seq/save', { name, steps: editing.steps });
+  if (j.ok) { editing.name = name; $('seqsel').dataset.key = ''; await poll(); $('seqsel').value = name; }
+}
+function playSeq() { const n = $('seqsel').value; if (!n) return toast('choisissez une séquence enregistrée');
+  api('/api/seq/play', { name:n }); }
+function delSeq() { const n = $('seqsel').value; if (n && confirm('Supprimer la séquence « ' + n + ' » ?'))
+  api('/api/seq/delete', { name:n }).then(j => { if (j.ok) newSeq(); }); }
+
+// --- etat ---
+async function poll() {
+  try {
+    const r = await fetch('/api/state'); S = await r.json();
+    $('conn').textContent = 'connecté'; $('conn').className = 'pill';
+  } catch (e) { $('conn').textContent = 'déconnecté'; $('conn').className = 'pill bad'; return; }
+  const legs = S.relaxed.filter(i => (i >= 7 && i <= 12) || (i >= 19 && i <= 24)).length;
+  const arms = S.relaxed.length - legs;
+  const rx = $('relaxed');
+  rx.textContent = S.moving ? '▶ ' + S.action : (S.relaxed.length ?
+    `relâchés : ${legs ? 'jambes ' : ''}${arms ? 'bras/tête' : ''}` : 'tous tenus');
+  rx.className = 'pill ' + (S.moving ? 'mv' : S.relaxed.length ? 'on' : '');
+  $('imu').textContent = S.imu ? `tangage ${S.imu.tangage.toFixed(1)}°  roulis ${S.imu.roulis.toFixed(1)}°` : 'centrale -';
+  $('msg').textContent = S.msg;
+  $('legs').innerHTML = S.legs.map(l => `<tr><td>${l[0]}</td><td class="n">${l[1].toFixed(1)}</td><td class="n">${l[2].toFixed(1)}</td></tr>`).join('');
+  renderPoses(); renderSeqList();
+}
+setInterval(poll, 500); poll();
+
+// --- arret ---
+$('stop').onclick = () => api('/api/stop');
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space' && !['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
+    e.preventDefault(); api('/api/stop');
+  }
+});
+
+// --- manette (API Gamepad du navigateur, disposition standard) ---
+const BTN = { A:0, B:1, X:2, Y:3, LB:4, RB:5 };
+let prev = {}; let lbArmed = 0;
+function padLoop() {
+  const gp = [...(navigator.getGamepads ? navigator.getGamepads() : [])].find(g => g);
+  if (gp) {
+    $('pad').textContent = 'connectée : ' + gp.id.slice(0, 40);
+    const down = k => gp.buttons[BTN[k]] && gp.buttons[BTN[k]].pressed;
+    const edge = k => { const d = down(k), p = prev[k]; prev[k] = d; return d && !p; };
+    if (edge('B')) api('/api/stop');
+    if (edge('A')) api('/api/hold');
+    if (edge('RB')) api('/api/relax', { group:'bras' });
+    if (edge('X')) api('/api/record', { name:'', group: $('group').value });
+    if (edge('Y')) playSeq();
+    if (edge('LB')) {
+      if (Date.now() - lbArmed < 3000) { lbArmed = 0; api('/api/relax', { group:'jambes' }); }
+      else { lbArmed = Date.now(); toast('LB encore une fois pour relâcher les jambes'); }
+    }
+  }
+  requestAnimationFrame(padLoop);
+}
+window.addEventListener('gamepadconnected', () => toast('manette connectée'));
+padLoop();
+</script>
+</body>
+</html>

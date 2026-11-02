@@ -39,6 +39,9 @@ class NumpySocket:
         if self.is_sender:
             self._sock.connect((host, port))
         else:
+            # Port reutilisable tout de suite apres l'arret d'un ancien recepteur (sinon « Address already in use »
+            # pendant ~60 s, le temps que le systeme libere l'ancienne connexion)
+            self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self._sock.bind((host, port))
             self._sock.listen(1)
             print(f"[Receiver] Listening on {host}:{port} ...")
