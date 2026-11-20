@@ -1,4 +1,5 @@
 """Ecoute vocale de Victor (a lancer sur le Pi) : micro -> Vosk + Google -> page de commande du portable.
+Victor repond a voix haute dans son haut-parleur (parole.py) : « Oui ? » des qu'il entend son nom, puis sa reponse.
 
 Vosk (local) guette « Victor » et « stop ». Apres « Victor », le son de la commande est enregistre
 jusqu'a la fin de la phrase, puis transcrit par Google en francais canadien (fr-CA) : bien meilleur
@@ -14,6 +15,8 @@ Regles :
   « stop », « arrete », « halte » : arret immediat (POST /api/stop), meme sans « Victor »,
   des la reconnaissance partielle, sans attendre la fin de la phrase.
   Une pause de moins de 0,8 s au milieu de la commande ne la coupe pas.
+  Pendant que Victor repond, le micro est sourd (il ne s'entend pas lui-meme) : STOP passe par la page web
+  ou la manette pendant ces quelques secondes.
 
 Dependances sur le Pi : pip install vosk SpeechRecognition ; apt install flac
 (Google : acces gratuit non officiel de la bibliotheque SpeechRecognition, peut cesser sans preavis.)
@@ -27,6 +30,14 @@ import sys
 import threading
 import time
 import urllib.request
+
+from parole import Parole, VOIX
+
+PAS_COMPRIS = "Je n'ai pas compris. Peux-tu répéter ?"
+INJOIGNABLE = "Je n'arrive pas à joindre l'ordinateur."
+OUI = 'Oui ?'
+# Le « Oui ? » de Victor s'entend dans l'enregistrement de la commande : on le retire du debut.
+ECHO_OUI = re.compile(r"^(oui|ouais|wii?)\b[\s,.!?]*", re.I)
 
 RATE = 16000
 BLOC = 4000                      # octets lus a la fois (0,125 s de son)
@@ -122,8 +133,9 @@ def transcrire_google(son):
     return [a['transcript'] for a in brut.get('alternative', []) if a.get('transcript')]
 
 
-def traiter_commande(base, son, texte_vosk, google, test):
-    """Transcrit (Google, sinon Vosk), puis envoie la commande au portable. Tourne dans un fil a part."""
+def traiter_commande(base, son, texte_vosk, google, test, voix=None):
+    """Transcrit (Google, sinon Vosk), envoie la commande au portable et dit la reponse. Tourne dans un fil a part."""
+    dire = voix.dire if voix is not None else (lambda *a, **k: None)
     t0 = time.monotonic()
     hyp = transcrire_google(son) if google else None
     source = 'google'
@@ -131,6 +143,8 @@ def traiter_commande(base, son, texte_vosk, google, test):
         hyp, source = [texte_vosk], 'vosk'
     texte = hyp[0] if hyp else ''
     commande = corriger(apres_victor(texte))
+    if voix is not None:
+        commande = ECHO_OUI.sub('', commande)
     autres = []                                  # autres hypotheses, transmises a l'IA qui choisit
     for h in hyp[1:]:
         c = corriger(apres_victor(h))
@@ -141,6 +155,7 @@ def traiter_commande(base, son, texte_vosk, google, test):
         print(f'[ecoute]    autre hypothese : « {c} »')
     if not commande:
         print('[ecoute] commande vide, rien envoye')
+        dire(PAS_COMPRIS)
         return
     if (STOP.search(commande) if source == 'google' else seul_stop(commande)):
         poster(base, '/api/stop', {}, test)
@@ -149,6 +164,9 @@ def traiter_commande(base, son, texte_vosk, google, test):
     r = poster(base, '/api/phrase', {'texte': commande, 'alternatives': autres[:4], 'vosk': vosk}, test)
     if r:
         print(f"   {r.get('reponse', '')}  actions : {r.get('actions')}  refus : {r.get('refus')}")
+        dire(r.get('parole') or r.get('reponse') or '')
+    elif not test:
+        dire(INJOIGNABLE)
 
 
 def main():
@@ -161,6 +179,9 @@ def main():
     ap.add_argument('--test', action='store_true', help="afficher ce qui est entendu sans rien envoyer")
     ap.add_argument('--libre', action='store_true', help='dictee libre pour Vosk (sans vocabulaire limite)')
     ap.add_argument('--sans-google', action='store_true', help='Vosk seulement (hors ligne)')
+    ap.add_argument('--hp', default='auto', help='sortie son ALSA du haut-parleur (defaut : la sortie USB)')
+    ap.add_argument('--voix', default=VOIX, help=f'voix de Victor (defaut {VOIX}, voir parole.py --essai)')
+    ap.add_argument('--muet', action='store_true', help="Victor ne parle pas (le portable joue « We! » comme avant)")
     args = ap.parse_args()
 
     if args.liste:
@@ -177,6 +198,10 @@ def main():
     else:
         mots = sorted(set(VOCABULAIRE.split())) + ['[unk]']
         rec = KaldiRecognizer(Model(args.modele), RATE, json.dumps(mots, ensure_ascii=False))
+    voix = None
+    if not args.muet:
+        voix = Parole(args.hp, args.voix)
+        voix.prechauffer(OUI, PAS_COMPRIS, INJOIGNABLE)
     # arecord convertit le son du micro en 16 kHz mono 16 bits (plughw:)
     son = subprocess.Popen(['arecord', '-q', '-D', args.micro, '-f', 'S16_LE', '-r', str(RATE), '-c', '1', '-t', 'raw'],
                            stdout=subprocess.PIPE)
@@ -188,11 +213,14 @@ def main():
     t = 0.0                      # temps du son (s)
     cap = None                   # commande en cours d'enregistrement : {'son', 'textes', 'debut', 'fin'}
     stop_envoye = False          # un seul STOP par phrase
+    etait_sourd = False          # Victor parlait au bloc precedent
 
     def commencer(par_partiel):
         print("[ecoute] Victor entendu, j'ecoute...")
-        # « We! » joue par le portable ; dans un fil a part pour ne pas retarder l'ecoute
-        threading.Thread(target=poster, args=(base, '/api/eveil', {}, args.test), daemon=True).start()
+        if voix is not None:
+            voix.dire(OUI, sourd=False, si_libre=True)     # micro ouvert : la commande suit tout de suite
+        else:   # « We! » joue par le portable ; dans un fil a part pour ne pas retarder l'ecoute
+            threading.Thread(target=poster, args=(base, '/api/eveil', {}, args.test), daemon=True).start()
         return {'son': list(avant), 'textes': [], 'debut': t, 'fin': None, 'partiel': par_partiel}
 
     def reste(c):
@@ -209,6 +237,12 @@ def main():
             if not bloc:
                 sys.exit("[ecoute] le micro ne donne plus de son (arecord arrete). Verifiez --micro.")
             t += bloc_s
+            if voix is not None and voix.sourd():
+                etait_sourd = True                    # Victor parle : il ne s'ecoute pas lui-meme
+                continue
+            if etait_sourd:
+                rec.Reset()                           # oublier l'echo de sa propre voix
+                etait_sourd = False
             avant.append(bloc)
             if cap is not None:
                 cap['son'].append(bloc)
@@ -243,7 +277,7 @@ def main():
                 if reste(cap) or not args.sans_google:
                     threading.Thread(target=traiter_commande, daemon=True,
                                      args=(base, b''.join(cap['son']), reste(cap),
-                                           not args.sans_google, args.test)).start()
+                                           not args.sans_google, args.test, voix)).start()
                 cap = None
     except KeyboardInterrupt:
         pass

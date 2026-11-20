@@ -1,4 +1,5 @@
-"""Comprendre une phrase en francais (tapee ou dictee) et la traduire en actions de Victor.
+"""Comprendre une phrase en francais (tapee ou dictee) et la traduire en actions de Victor,
+ou y repondre comme un robot conversationnel (« comment vas-tu ? », « parle-moi de toi »...).
 
 1. « stop », « arrete », « halte »... : reconnu ici, sans attendre l'IA.
 2. Sinon : Claude (API Anthropic) choisit des actions dans la liste fermee de actions.py.
@@ -41,7 +42,8 @@ OUTIL = {
                 },
                 'required': ['type'],
             }},
-            'reponse': {'type': 'string', 'description': 'phrase courte en francais que Victor dira, a la premiere personne'},
+            'reponse': {'type': 'string', 'description': 'ce que Victor dit a voix haute, a la premiere personne : '
+                        'confirmation courte d\'une action, ou reponse a une question ou a une phrase de conversation'},
         },
         'required': ['actions', 'reponse'],
     },
@@ -98,8 +100,24 @@ Commandes composees (vocabulaire a respecter) :
 - attendre : 'secondes'.
 - stop : tout arreter.
 Plusieurs demandes dans la phrase = plusieurs actions dans l'ordre.
-Si la phrase n'est pas une demande d'action ou n'a pas de sens, renvoie une liste vide et explique en une phrase.
-La reponse est courte et naturelle, par exemple « J'avance de 5 pas. »"""
+
+Conversation : on peut aussi simplement parler a Victor (« comment vas-tu ? », « quel est ton nom ? »,
+« parle-moi de toi », une question de culture generale, une blague...). Alors : aucune action, et la reponse
+est ce que Victor repond, comme dans une vraie conversation.
+Qui est Victor (n'invente rien d'autre sur lui) : un petit robot humanoide d'environ 3 kg, imprime en 3D et
+assemble par Gilles a partir du projet libre Vibe A1 ; 25 moteurs ; un Raspberry Pi 4 comme cerveau ; une camera
+avec un micro dans la tete ; un haut-parleur ; une batterie. Il comprend ce qu'on lui dit grace a Claude,
+une intelligence artificielle d'Anthropic.
+Caractere : curieux, sympathique, un brin blagueur ; il tutoie et parle un francais du Quebec naturel,
+sans exagerer les expressions.
+Il ne connait ni l'etat de sa batterie, ni sa temperature, ni l'heure, ni la meteo, ni les nouvelles,
+et n'a pas acces a Internet : il ne les invente jamais et le dit simplement si on les demande.
+Si la phrase est confuse ou incomprehensible : aucune action, et demande gentiment de repeter.
+Si on demande une chose que Victor ne sait pas faire : aucune action ; dis-le simplement et propose,
+si possible, ce qui s'en approche.
+La reponse est LUE A VOIX HAUTE : francais correct avec tous les accents, sans liste, sans emoji, sans symbole
+ni abreviation. Courte : une phrase pour confirmer une action (« J'avance de 5 pas. ») ; une ou deux phrases
+pour une question ; quatre au maximum si on demande d'en raconter plus (une histoire, une explication)."""
 
 MOTS_STOP = re.compile(r"\b(stop|arr[eê]te|arr[eê]tes|halte|immobile|bouge plus|ne bouge pas)\b", re.I)
 NOMBRES = {'un': 1, 'une': 1, 'deux': 2, 'trois': 3, 'quatre': 4, 'cinq': 5, 'six': 6, 'sept': 7, 'huit': 8,
@@ -162,9 +180,10 @@ def _message_voix(t, alternatives, vosk=''):
             f'1. {t}\n{lignes}\n'
             + (f'Un 2e systeme, qui ne connait que les mots des commandes du robot, a entendu : « {vosk} ».\n'
                if vosk else '')
-            + 'Choisis l\'interpretation qui forme une commande sensee pour le robot et execute-la. '
-            'Si aucune ne correspond clairement a une commande, ne fais AUCUNE action et demande de repeter : '
-            'n\'invente jamais un deplacement (avancer, reculer, pas de cote, tourner) a partir d\'un texte confus.')
+            + 'Choisis l\'interpretation la plus sensee : une commande pour le robot (execute-la), ou une question '
+            'ou une phrase de conversation (reponds-y, sans action). Si rien n\'est clair, ne fais AUCUNE action '
+            'et demande de repeter : n\'invente jamais un deplacement (avancer, reculer, pas de cote, tourner) '
+            'a partir d\'un texte confus.')
 
 
 class Comprehension:
@@ -189,7 +208,7 @@ class Comprehension:
         if not t:
             return [], 'Oui ?', 'local'
         if MOTS_STOP.search(t):
-            return [{'type': 'stop'}], 'Je m\'arrete.', 'local'
+            return [{'type': 'stop'}], 'Je m\'arrête.', 'local'
         if self.client is not None:
             try:
                 msg = self.client.messages.create(
@@ -204,4 +223,4 @@ class Comprehension:
             except Exception as e:
                 print(f'[victor] IA indisponible ({type(e).__name__}) : grammaire de secours')
         acts = grammaire(t)
-        return acts, ('D\'accord.' if acts else 'Je n\'ai pas compris.'), 'secours'
+        return acts, ('D\'accord.' if acts else 'Je n\'ai pas compris. Peux-tu répéter ?'), 'secours'

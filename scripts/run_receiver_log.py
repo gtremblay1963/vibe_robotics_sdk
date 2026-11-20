@@ -18,13 +18,22 @@ from viberobotics.motor.motor_controller_manager import MotorControllerManager
 from viberobotics.motor.ftservo_python_sdk.scservo_sdk.group_sync_read import GroupSyncRead
 from viberobotics.motor.ftservo_python_sdk.scservo_sdk.sms_sts import (
     COMM_SUCCESS, SMS_STS_PRESENT_POSITION_L, SMS_STS_PRESENT_SPEED_L, SMS_STS_PRESENT_LOAD_L,
-    SMS_STS_TORQUE_ENABLE)
+    SMS_STS_TORQUE_ENABLE, SMS_STS_PRESENT_VOLTAGE)
 
 
 ANKLE_PITCH_IDS = (11, 23)   # chevilles avant-arriere (droite, gauche)
 ARM_IDS = (1, 2, 3, 4, 5, 13, 14, 15, 16, 17)
 GRIPPER_IDS = (6, 18)
 TORQUE_LIMIT_ADDR = 48       # STS3215 : limite de couple en RAM, 0 a 1000 (0,1 %), remise a 100 % a la mise sous tension
+# Batterie LiPo 3S (11,1 V nominale, 12,6 V pleine) : tension lue par les servos des jambes (registre 62, 0,1 V).
+# La tension chute sous l'effort : on juge sur le maximum des 10 dernieres secondes (proche de la tension au repos).
+# Le servo mesure apres les fils (~0,1-0,2 V sous la batterie) : les alertes viennent un peu plus tot, c'est voulu.
+BATT_IDS = (7, 19)            # hanches droite et gauche
+BATT_PERIODE = 2.0            # s entre deux lectures
+BATT_FENETRE = 10.0           # s
+BATT_RECHARGER = 10.8         # V (3,6 V par cellule) : a recharger bientot
+BATT_CRITIQUE = 10.4          # V (3,47 V par cellule) : arreter et recharger (sous 9,0 V la LiPo s'abime)
+BATT_RAPPEL = 60.0            # s entre deux affichages de la tension
 HORS_SERVICE = ''            # servos en panne, sans couple (ex. '4') ; coude droit remplace le 2026-10-28
 
 
@@ -93,6 +102,30 @@ def run(manager, log_path, acc=50):
             load.append(handler.scs_tohost(reader.getData(i, SMS_STS_PRESENT_LOAD_L, 2), 10))
         return pos + speed + load
 
+    batt = {'t': 0.0, 'mesures': [], 'etat': None, 'affiche': 0.0}
+
+    def batterie(t):
+        """Toutes les BATT_PERIODE s : lit la tension, affiche l'etat a chaque changement et toutes les minutes."""
+        if t - batt['t'] < BATT_PERIODE:
+            return
+        batt['t'] = t
+        lu = []
+        for i in BATT_IDS:
+            v, res, err = handler.read1ByteTxRx(i, SMS_STS_PRESENT_VOLTAGE)
+            if res == COMM_SUCCESS and 50 <= v <= 170:
+                lu.append(v / 10.0)
+        if not lu:
+            return
+        batt['mesures'] = [(tm, v) for tm, v in batt['mesures'] if t - tm < BATT_FENETRE] + [(t, sum(lu) / len(lu))]
+        v = max(m for _, m in batt['mesures'])
+        etat = 'CRITIQUE' if v <= BATT_CRITIQUE else 'a recharger' if v <= BATT_RECHARGER else 'ok'
+        if etat != batt['etat'] or t - batt['affiche'] >= BATT_RAPPEL:
+            cellule = v / 3
+            msg = {'ok': '', 'a recharger': ' -> A RECHARGER BIENTOT',
+                   'CRITIQUE': ' -> CRITIQUE : ARRETEZ LE ROBOT ET RECHARGEZ'}[etat]
+            print(f'[batterie] {v:.1f} V ({cellule:.2f} V par cellule){msg}', flush=True)
+            batt['etat'], batt['affiche'] = etat, t
+
     n, failed, read_s = 0, 0, 0.0
     with open(log_path, 'w') as log:
         log.write('t,' + ','.join(f'{k}{i}' for k in 'cpvl' for i in ids) + '\n')
@@ -105,6 +138,10 @@ def run(manager, log_path, acc=50):
                 print(f"Error in receiver loop: {e}")
                 break
             t = time.time()
+            try:
+                batterie(t)
+            except Exception:
+                pass
             try:
                 state = read_legs()
             except Exception:

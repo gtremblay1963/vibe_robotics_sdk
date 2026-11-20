@@ -29,6 +29,27 @@ def jouer_eveil():
     else:
         winsound.MessageBeep()
 
+def a_voix_haute(err):
+    """Message de refus de valider() lisible a voix haute : « angle hors limites (1 a 720 deg) »
+    -> « angle hors limites, de 1 à 720 degrés »."""
+    s = re.sub(r'\bdeg\b', 'degrés', err)
+    s = re.sub(r'\bmax\b', 'maximum', s)
+    s = re.sub(r'\(1 a\b', '(de 1 a', s)
+    s = re.sub(r'\ba\b', 'à', s)
+    s = re.sub(r'\bcote\b', 'côté', s)
+    s = re.sub(r'\btete\b', 'tête', s)
+    return s.replace(' (', ', ').replace('(', '').replace(')', '')
+
+
+def phrase_dite(reponse, ok, refus):
+    """Ce que Victor dit : sa reponse, et ce qu'il refuse. Si TOUT est refuse, la reponse de l'IA
+    (« J'avance de 50 pas. ») serait fausse : on ne dit que le refus."""
+    if not refus:
+        return reponse
+    pas_possible = 'Je ne peux pas : ' + ' ; '.join(a_voix_haute(e) for e in refus) + '.'
+    return f'{reponse} Mais {pas_possible[0].lower()}{pas_possible[1:]}' if ok else f'Désolé. {pas_possible}'
+
+
 PAGE = """<!doctype html><html lang="fr"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>Victor</title>
 <style>
@@ -107,7 +128,7 @@ def demarrer(executeur, comprehension, port=8091):
                     executeur.log('  autres hypotheses : ' + ' | '.join(autres))
                 if ENCORE.fullmatch(nettoyer(texte)):
                     if not derniere['actions']:
-                        return self.reply({'actions': [], 'refus': [], 'reponse': 'Je n\'ai rien a refaire.',
+                        return self.reply({'actions': [], 'refus': [], 'reponse': 'Je n\'ai rien à refaire.',
                                            'source': 'local'})
                     executeur.ajouter([dict(a) for a in derniere['actions']])
                     return self.reply({'actions': [decrire(a) for a in derniere['actions']], 'refus': [],
@@ -120,7 +141,8 @@ def demarrer(executeur, comprehension, port=8091):
                 if ok:
                     executeur.ajouter(ok)
                     derniere['actions'] = [dict(a) for a in ok]
-                return self.reply({'actions': [decrire(a) for a in ok], 'refus': refus, 'reponse': rep, 'source': src})
+                return self.reply({'actions': [decrire(a) for a in ok], 'refus': refus, 'reponse': rep,
+                                   'parole': phrase_dite(rep, ok, refus), 'source': src})
             self.reply({'ok': False})
 
     srv = ThreadingHTTPServer(('0.0.0.0', port), H)
